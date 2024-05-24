@@ -27,13 +27,11 @@ from src.visual_data_handlers import Scan
 from .scannet_classes import REL_ALIASES, VIEW_DEP_RELS
 
 
-NUM_CLASSES = 288
-# DC = ScannetDatasetConfig(NUM_CLASSES)
-# DC18 = ScannetDatasetConfig(18)
-MAX_NUM_OBJ = 160
-SAMPLE_RATE = 10
+NUM_CLASSES = 485
+DC = ScannetDatasetConfig(NUM_CLASSES)
+DC18 = ScannetDatasetConfig(18)
+MAX_NUM_OBJ = 132
 
-from utils.utils_read import read_es_infos, read_type2int, NUM2RAW_3RSCAN, RAW2NUM_3RSCAN, apply_mapping_to_keys, to_scene_id
 
 class Joint3DDataset(Dataset):
     """Dataset utilities for ReferIt3D."""
@@ -44,8 +42,7 @@ class Joint3DDataset(Dataset):
                  data_path='./',
                  use_color=False, use_height=False, use_multiview=False,
                  detect_intermediate=False,
-                 butd=False, butd_gt=False, butd_cls=False, augment_det=False,
-                 es_info_file=None):
+                 butd=False, butd_gt=False, butd_cls=False, augment_det=False):
         """Initialize dataset (here for ReferIt3D utterances)."""
         self.dataset_dict = dataset_dict
         self.test_dataset = test_dataset
@@ -61,22 +58,13 @@ class Joint3DDataset(Dataset):
         self.butd = butd
         self.butd_gt = butd_gt
         self.butd_cls = butd_cls
-        self.es_info_file = es_info_file
-        self.box_dim = 9
-
-        if self.es_info_file:
-            self.es_info = read_es_infos(self.es_info_file, count_type_from_zero=True)
-            self.es_info = apply_mapping_to_keys(self.es_info, NUM2RAW_3RSCAN)
-        else:  # empty dict if no es_info_file
-            self.es_info = {}
-        # self.type2int = read_type2int(self.es_info_file)
         self.joint_det = (  # joint usage of detection/grounding phrases
             'scannet' in dataset_dict
             and len(dataset_dict.keys()) > 1
             and self.split == 'train'
         )
         self.augment_det = augment_det
-        self.num_points = 40000
+
         self.mean_rgb = np.array([109.8, 97.2, 83.8]) / 256
         self.label_map = read_label_mapping(
             'data/meta_data/scannetv2-labels.combined.tsv',
@@ -107,8 +95,8 @@ class Joint3DDataset(Dataset):
         print('Loading %s files, take a breath!' % split)
         if not os.path.exists(f'{self.data_path}/{split}_v3scans.pkl'):
             save_data(f'{data_path}/{split}_v3scans.pkl', split, data_path)
-        # self.scans = unpickle_data(f'{self.data_path}/{split}_v3scans.pkl')
-        # self.scans = list(self.scans)[0]
+        self.scans = unpickle_data(f'{self.data_path}/{split}_v3scans.pkl')
+        self.scans = list(self.scans)[0]
         if self.split != 'train':
             self.annos = self.load_annos(test_dataset)
         else:
@@ -128,62 +116,11 @@ class Joint3DDataset(Dataset):
             'sr3d': self.load_sr3d_annos,
             'sr3d+': self.load_sr3dplus_annos,
             'scanrefer': self.load_scanrefer_annos,
-            'scannet': self.load_scannet_annos,
-            'es': self.load_es_annos,
+            'scannet': self.load_scannet_annos
         }
         annos = loaders[dset]()
         if self.overfit:
             annos = annos[:128]
-        return annos
-
-    def load_es_annos(self):
-        """Load annotations of embodiedscan. es_mod"""
-        # es_vg_path = "/mnt/hwfile/OpenRobotLab/lvruiyuan/es_gen_text/VG.json"
-        es_vg_path = f"/mnt/petrelfs/lvruiyuan/embodiedscan_infos/embodiedscan_{self.split}_mini_vg.json"
-        with open(es_vg_path, 'r') as f:
-            es_vg = json.load(f)
-        # {"scan_id": "scene0000_00", "target_id": [7], "distractor_ids": [], "text": "choose the curtain that is above the desk", "target": ["curtain"], "anchors": ["desk"], "anchor_ids": [8], "tokens_positive": [[11, 18], [37, 41]]}
-
-        annos = []
-        for i, anno in enumerate(es_vg):
-            # if i % SAMPLE_RATE != 0:
-            #     continue
-            scan_id = anno['scan_id']
-            scan_id = to_scene_id(scan_id)
-            scan_id = NUM2RAW_3RSCAN.get(scan_id, scan_id)
-            if scan_id not in self.es_info:
-                print(f"drop due to scan id {scan_id}")
-                continue
-            obj_ids = list(self.es_info[scan_id]["object_ids"])
-            target_id = anno['target_id'][0] if isinstance(anno['target_id'], list) else anno['target_id']
-            anchor_ids = anno['anchor_ids']
-            if not isinstance(target_id, int):
-                print(f"drop due to target id {target_id}")
-                continue
-            target_index = obj_ids.index(target_id)
-            if isinstance(anchor_ids, int):
-                anchor_ids = [anchor_ids]
-            try:
-                anchor_indices = [obj_ids.index(x) for x in anchor_ids]
-            except ValueError: # some anchor ids is broken
-                print(f"drop due to anchor id fail indexing {anchor_ids}")
-                continue 
-            if target_index >= MAX_NUM_OBJ or (np.array(anchor_indices)>=MAX_NUM_OBJ).any():
-                print(f"drop due to too many objects")
-                continue
-            out_dict = {
-                'scan_id': scan_id,
-                'target_id': target_index,
-                'distractor_ids': anno['distractor_ids'],
-                'utterance': anno['text'],
-                'target': anno['target'][0] if isinstance(anno['target'], list) else anno['target'],
-                'anchors': anno['anchors'],
-                'anchor_ids': anchor_indices,
-                'dataset': "es",
-                'pred_pos_map': anno['tokens_positive'],  # span
-                'span_utterance': anno['text'], # es mod: 
-            }
-            annos.append(out_dict)
         return annos
 
     def load_sr3dplus_annos(self):
@@ -373,7 +310,7 @@ class Joint3DDataset(Dataset):
         return annos
 
     def _sample_classes(self, scan_id):
-        """Sample classes for the scannet detection sentences. Not used in es."""
+        """Sample classes for the scannet detection sentences."""
         scan = self.scans[scan_id]
         sampled_classes = set([
             self.label_map[scan.get_object_instance_label(ind)]
@@ -468,8 +405,6 @@ class Joint3DDataset(Dataset):
     def _get_pc(self, anno, scan):
         """Return a point cloud representation of current scene."""
         scan_id = anno['scan_id']
-        if anno['dataset'] == 'es':
-            return self._get_pc_es(anno, scan_id)
         rel_name = "none"
         if anno['dataset'].startswith('sr3d'):
             rel_name = self._find_rel(anno['utterance'])
@@ -517,74 +452,6 @@ class Joint3DDataset(Dataset):
 
         return point_cloud, augmentations, scan.color
 
-    def _get_pc_es(self, anno, scan_id, quick_load=False):
-        """
-            if quick_load: returns full-context point_cloud, augmentations, color.
-            else: returns pc, color, instance_ids, obj_masks 
-        """
-        if not hasattr(self, 'scan_gt_pcd_data'):
-            self.scan_gt_pcd_data = {}
-        if scan_id in self.scan_gt_pcd_data:
-            pc, colors, instance_ids, obj_masks = self.scan_gt_pcd_data[scan_id]
-        else:
-            pcd_data_path = os.path.join("/mnt/hwfile/OpenRobotLab/lvruiyuan/pcd_data", 'pcd_with_global_alignment', f'{scan_id}.pth')
-            if not os.path.exists(pcd_data_path):
-                print(f"Error: {pcd_data_path} does not exist.")
-                self.scan_gt_pcd_data[scan_id] = None
-                return None
-            pc, colors, label, instance_ids = torch.load(pcd_data_path)
-            # es-specific
-            obj_masks = []
-            for obj_id in self.es_info[scan_id]['object_ids']:
-                obj_id = int(obj_id)
-                mask = instance_ids == obj_id
-                obj_masks.append(mask)
-            self.scan_gt_pcd_data[scan_id] = (pc, colors, instance_ids, obj_masks)
-        if quick_load:
-            return self.scan_gt_pcd_data[scan_id]
-            
-        rel_name = "none"
-        if anno['dataset'].startswith('sr3d'):
-            rel_name = self._find_rel(anno['utterance'])
-        # a. Color
-        color = None
-        if self.use_color:
-            color = colors - self.mean_rgb
-        # b .Height
-        height = None
-        if self.use_height:
-            floor_height = np.percentile(pc[:, 2], 0.99)
-            height = np.expand_dims(pc[:, 2] - floor_height, 1)
-        # c. Multi-view 2d features
-        multiview_data = None
-        assert not self.use_multiview, "Multiview not supported for es."
-        if self.use_multiview:
-            multiview_data = self._load_multiview(scan_id)
-        # d. Augmentations
-        if self.split == 'train' and self.augment:
-            rotate_natural = (
-                anno['dataset'] in ('nr3d', 'scanrefer', 'es')
-                and self._augment_nr3d(anno['utterance'])
-            )
-            rotate_sr3d = (
-                anno['dataset'].startswith('sr3d')
-                and rel_name not in VIEW_DEP_RELS
-            )
-            rotate_else = anno['dataset'] == 'scannet'
-            rotate = rotate_sr3d or rotate_natural or rotate_else
-            pc, color, augmentations = self._augment(pc, color, rotate)
-
-        # e. Concatenate representations
-        point_cloud = pc
-        if color is not None:
-            point_cloud = np.concatenate((point_cloud, color), 1)
-        if height is not None:
-            point_cloud = np.concatenate([point_cloud, height], 1)
-        if multiview_data is not None:
-            point_cloud = np.concatenate([point_cloud, multiview_data], 1)
-
-        return point_cloud, augmentations, color
-    
     def _get_token_positive_map(self, anno):
         """Return correspondence of boxes to tokens."""
         # Token start-end span in characters
@@ -598,17 +465,6 @@ class Joint3DDataset(Dataset):
         if self.detect_intermediate:
             cat_names += anno['anchors']
         for c, cat_name in enumerate(cat_names):
-            if anno["dataset"] == "es":
-                try:
-                    bgn_idx = anno['pred_pos_map'][c][0]
-                    end_idx = anno['pred_pos_map'][c][1]
-                    cat_name = anno['utterance'][bgn_idx:end_idx]
-                    cat_name = cat_name.strip()
-                except Exception as e:
-                    pass
-                    # print(anno['pred_pos_map'])
-                    # print(anno['utterance'])
-            cat_name = cat_name.split(" ")[0] # TODO: fix this hack
             start_span = caption.find(' ' + cat_name + ' ')
             len_ = len(cat_name)
             if start_span < 0:
@@ -623,8 +479,8 @@ class Joint3DDataset(Dataset):
                 while caption[len_ + start_span] != ' ':
                     len_ += 1
             end_span = start_span + len_
-            assert start_span > -1, (caption, cat_name)
-            assert end_span > 0, (caption, cat_name)
+            assert start_span > -1, caption
+            assert end_span > 0, caption
             tokens_positive[c][0] = start_span
             tokens_positive[c][1] = end_span
 
@@ -638,48 +494,134 @@ class Joint3DDataset(Dataset):
         positive_map[:len(cat_names)] = gt_map
         return tokens_positive, positive_map
 
-    def _get_target_boxes_es(self, anno, scan_id):
-        """
-            return bboxes, box_label_mask, point_instance_label
-        """
-        # TODO: make 9-dof
-        bboxes = np.zeros((MAX_NUM_OBJ, self.box_dim))
+    def _get_target_boxes(self, anno, scan):
+        """Return gt boxes to detect."""
+        bboxes = np.zeros((MAX_NUM_OBJ, 6))
         if isinstance(anno['target_id'], list):  # scannet
             tids = anno['target_id']
         else:  # referit dataset
             tids = [anno['target_id']]
             if self.detect_intermediate:
                 tids += anno.get('anchor_ids', [])
-        tindices = tids # now we use indices when loading for anno
-        pc , _, _, obj_masks = self._get_pc_es(anno, scan_id, quick_load=True)
-        point_instance_label = -np.ones(len(pc))
-        for t, tindex in enumerate(tindices):
-            point_instance_label[obj_masks[tindex]] = t
-        bboxes[:len(tindices)] = np.stack([
-            self.es_info[scan_id]['bboxes'][tindex][:self.box_dim] for tindex in tindices
+        point_instance_label = -np.ones(len(scan.pc))
+        for t, tid in enumerate(tids):
+            point_instance_label[scan.three_d_objects[tid]['points']] = t
+
+        bboxes[:len(tids)] = np.stack([
+            scan.get_object_bbox(tid).reshape(-1) for tid in tids
         ])
+        bboxes = np.concatenate((
+            (bboxes[:, :3] + bboxes[:, 3:]) * 0.5,
+            bboxes[:, 3:] - bboxes[:, :3]
+        ), 1)
         if self.split == 'train' and self.augment:  # jitter boxes
-            bboxes[:len(tindices)] *= 0.95 + 0.1 * np.random.random((len(tindices), self.box_dim))
-        bboxes[len(tindices):, :3] = 1000
+            bboxes[:len(tids)] *= 0.95 + 0.1 * np.random.random((len(tids), 6))
+        bboxes[len(tids):, :3] = 1000
         box_label_mask = np.zeros(MAX_NUM_OBJ)
-        box_label_mask[:len(tindices)] = 1
+        box_label_mask[:len(tids)] = 1
         return bboxes, box_label_mask, point_instance_label
 
+    def _get_scene_objects(self, scan):
+        # Objects to keep
+        keep_ = np.array([
+            self.label_map[
+                scan.get_object_instance_label(ind)
+            ] in DC.nyu40id2class
+            for ind in range(len(scan.three_d_objects))
+        ])[:MAX_NUM_OBJ]
+        keep = np.array([False] * MAX_NUM_OBJ)
+        keep[:len(keep_)] = True  # keep_
 
-    def _get_scene_objects_es(self, scan_id):
-        all_bboxes = np.zeros((MAX_NUM_OBJ, self.box_dim))
-        all_bboxes_ = self.es_info[scan_id]['bboxes'][:MAX_NUM_OBJ, :self.box_dim] # already in 9-dof: center, size, euler
+        # Class ids
+        cid = np.array([
+            DC.nyu40id2class[self.label_map[scan.get_object_instance_label(k)]]
+            if keep_[k] else 325  # this is the 'object' class
+            for k, kept in enumerate(keep) if kept
+        ])
         class_ids = np.zeros((MAX_NUM_OBJ,))
-        class_ids_ = self.es_info[scan_id]['object_type_ints'][:MAX_NUM_OBJ]
-        class_ids[:len(class_ids_)] = class_ids_
-        num_items = len(all_bboxes_)
-        keep = np.zeros(MAX_NUM_OBJ, dtype=bool)
-        keep[:num_items] = True
-        all_bboxes[:num_items] = all_bboxes_
+        class_ids[keep] = cid
+
+        # Object boxes
+        all_bboxes = np.zeros((MAX_NUM_OBJ, 6))
+        all_bboxes_ = np.stack([
+            scan.get_object_bbox(k).reshape(-1)
+            for k, kept in enumerate(keep) if kept
+        ])
+        # cx, cy, cz, w, h, d
+        all_bboxes_ = np.concatenate((
+            (all_bboxes_[:, :3] + all_bboxes_[:, 3:]) * 0.5,
+            all_bboxes_[:, 3:] - all_bboxes_[:, :3]
+        ), 1)
+        all_bboxes[keep] = all_bboxes_
+        if self.split == 'train' and self.augment:
+            all_bboxes *= 0.95 + 0.1 * np.random.random((len(all_bboxes), 6))
+
+        # Which boxes we're interested for
         all_bbox_label_mask = keep
+        return class_ids, all_bboxes, all_bbox_label_mask
 
-        return class_ids, all_bboxes, all_bbox_label_mask        
+    def _get_detected_objects(self, split, scan_id, augmentations):
+        # Initialize
+        all_detected_bboxes = np.zeros((MAX_NUM_OBJ, 6))
+        all_detected_bbox_label_mask = np.array([False] * MAX_NUM_OBJ)
+        detected_class_ids = np.zeros((MAX_NUM_OBJ,))
+        detected_logits = np.zeros((MAX_NUM_OBJ, NUM_CLASSES))
 
+        # Load
+        detected_dict = np.load(
+            f'{self.data_path}group_free_pred_bboxes_{split}/{scan_id}.npy',
+            allow_pickle=True
+        ).item()
+
+        all_bboxes_ = np.array(detected_dict['box'])
+        classes = detected_dict['class']
+        cid = np.array([DC.nyu40id2class[
+            self.label_map[c]] for c in detected_dict['class']
+        ])
+
+        all_bboxes_ = np.concatenate((
+            (all_bboxes_[:, :3] + all_bboxes_[:, 3:]) * 0.5,
+            all_bboxes_[:, 3:] - all_bboxes_[:, :3]
+        ), 1)
+
+        assert len(classes) < MAX_NUM_OBJ
+        assert len(classes) == all_bboxes_.shape[0]
+
+        num_objs = len(classes)
+        all_detected_bboxes[:num_objs] = all_bboxes_
+        all_detected_bbox_label_mask[:num_objs] = np.array([True] * num_objs)
+        detected_class_ids[:num_objs] = cid
+        detected_logits[:num_objs] = detected_dict['logits']
+        # Match current augmentations
+        if self.augment and self.split == 'train':
+            all_det_pts = box2points(all_detected_bboxes).reshape(-1, 3)
+            all_det_pts = rot_z(all_det_pts, augmentations['theta_z'])
+            all_det_pts = rot_x(all_det_pts, augmentations['theta_x'])
+            all_det_pts = rot_y(all_det_pts, augmentations['theta_y'])
+            if augmentations.get('yz_flip', False):
+                all_det_pts[:, 0] = -all_det_pts[:, 0]
+            if augmentations.get('xz_flip', False):
+                all_det_pts[:, 1] = -all_det_pts[:, 1]
+            all_det_pts += augmentations['shift']
+            all_det_pts *= augmentations['scale']
+            all_detected_bboxes = points2box(all_det_pts.reshape(-1, 8, 3))
+        if self.augment_det and self.split == 'train':
+            min_ = all_detected_bboxes.min(0)
+            max_ = all_detected_bboxes.max(0)
+            rand_box = (
+                (max_ - min_)[None]
+                * np.random.random(all_detected_bboxes.shape)
+                + min_
+            )
+            corrupt = np.random.random(len(all_detected_bboxes)) > 0.7
+            all_detected_bboxes[corrupt] = rand_box[corrupt]
+            detected_class_ids[corrupt] = np.random.randint(
+                0, len(DC.nyu40ids), (len(detected_class_ids))
+            )[corrupt]
+        return (
+            all_detected_bboxes, all_detected_bbox_label_mask,
+            detected_class_ids, detected_logits
+        )
 
     def __getitem__(self, index):
         """Get current batch for input index."""
@@ -687,73 +629,64 @@ class Joint3DDataset(Dataset):
 
         # Read annotation
         anno = self.annos[index]
-        scan_id = anno['scan_id']
-        # scan = self.scans[anno['scan_id']]
-        # scan.pc = np.copy(scan.orig_pc)
+        scan = self.scans[anno['scan_id']]
+        scan.pc = np.copy(scan.orig_pc)
 
         # Populate anno (used only for scannet)
         self.random_utt = False
-        # if anno['dataset'] == 'scannet':
-        #     self.random_utt = self.joint_det and np.random.random() > 0.5
-        #     sampled_classes = self._sample_classes(anno['scan_id'])
-        #     utterance = self._create_scannet_utterance(sampled_classes)
-        #     # Target ids
-        #     if not self.random_utt:  # detection18 phrase
-        #         anno['target_id'] = np.where(np.array([
-        #             self.label_map18[
-        #                 scan.get_object_instance_label(ind)
-        #             ] in DC18.nyu40id2class
-        #             for ind in range(len(scan.three_d_objects))
-        #         ])[:MAX_NUM_OBJ])[0].tolist()
-        #     else:
-        #         anno['target_id'] = np.where(np.array([
-        #             self.label_map[
-        #                 scan.get_object_instance_label(ind)
-        #             ] in DC.nyu40id2class
-        #             and
-        #             DC.class2type[DC.nyu40id2class[self.label_map[
-        #                 scan.get_object_instance_label(ind)
-        #             ]]] in sampled_classes
-        #             for ind in range(len(scan.three_d_objects))
-        #         ])[:MAX_NUM_OBJ])[0].tolist()
-        #     # Target names
-        #     if not self.random_utt:
-        #         anno['target'] = [
-        #             DC18.class2type[DC18.nyu40id2class[self.label_map18[
-        #                 scan.get_object_instance_label(ind)
-        #             ]]]
-        #             if self.label_map18[
-        #                 scan.get_object_instance_label(ind)
-        #             ] != 39
-        #             else 'other furniture'
-        #             for ind in anno['target_id']
-        #         ]
-        #     else:
-        #         anno['target'] = [
-        #             DC.class2type[DC.nyu40id2class[self.label_map[
-        #                 scan.get_object_instance_label(ind)
-        #             ]]]
-        #             for ind in anno['target_id']
-        #         ]
-        #     anno['utterance'] = utterance
+        if anno['dataset'] == 'scannet':
+            self.random_utt = self.joint_det and np.random.random() > 0.5
+            sampled_classes = self._sample_classes(anno['scan_id'])
+            utterance = self._create_scannet_utterance(sampled_classes)
+            # Target ids
+            if not self.random_utt:  # detection18 phrase
+                anno['target_id'] = np.where(np.array([
+                    self.label_map18[
+                        scan.get_object_instance_label(ind)
+                    ] in DC18.nyu40id2class
+                    for ind in range(len(scan.three_d_objects))
+                ])[:MAX_NUM_OBJ])[0].tolist()
+            else:
+                anno['target_id'] = np.where(np.array([
+                    self.label_map[
+                        scan.get_object_instance_label(ind)
+                    ] in DC.nyu40id2class
+                    and
+                    DC.class2type[DC.nyu40id2class[self.label_map[
+                        scan.get_object_instance_label(ind)
+                    ]]] in sampled_classes
+                    for ind in range(len(scan.three_d_objects))
+                ])[:MAX_NUM_OBJ])[0].tolist()
+            # Target names
+            if not self.random_utt:
+                anno['target'] = [
+                    DC18.class2type[DC18.nyu40id2class[self.label_map18[
+                        scan.get_object_instance_label(ind)
+                    ]]]
+                    if self.label_map18[
+                        scan.get_object_instance_label(ind)
+                    ] != 39
+                    else 'other furniture'
+                    for ind in anno['target_id']
+                ]
+            else:
+                anno['target'] = [
+                    DC.class2type[DC.nyu40id2class[self.label_map[
+                        scan.get_object_instance_label(ind)
+                    ]]]
+                    for ind in anno['target_id']
+                ]
+            anno['utterance'] = utterance
 
         # Point cloud representation
-        point_cloud, augmentations, og_color = self._get_pc_es(anno, scan_id)
+        point_cloud, augmentations, og_color = self._get_pc(anno, scan)
 
         # "Target" boxes: append anchors if they're to be detected
         gt_bboxes, box_label_mask, point_instance_label = \
-            self._get_target_boxes_es(anno, scan_id)
-
-        sample_idxs = np.random.choice(
-            len(point_cloud),
-            self.num_points,
-            replace=len(point_cloud) < self.num_points
-        )
-        point_cloud = point_cloud[sample_idxs]
-        point_instance_label = point_instance_label[sample_idxs]
+            self._get_target_boxes(anno, scan)
 
         # Positive map for soft-token and contrastive losses
-        if anno['dataset'] in ["scannet", "es"]:
+        if anno['dataset'] == 'scannet':
             _, positive_map = self._get_token_positive_map(anno)
         else:
             assert anno['utterance'] == anno['span_utterance']  # sanity check
@@ -762,35 +695,32 @@ class Joint3DDataset(Dataset):
             positive_map[:len(positive_map_)] = positive_map_
 
         # Scene gt boxes
-        # if anno['dataset'] == 'es':
-        class_ids, all_bboxes, all_bbox_label_mask = self._get_scene_objects_es(anno['scan_id'])
-        # else:
-        #     (
-        #         class_ids, all_bboxes, all_bbox_label_mask
-        #     ) = self._get_scene_objects(scan)
+        (
+            class_ids, all_bboxes, all_bbox_label_mask
+        ) = self._get_scene_objects(scan)
 
         # Detected boxes
-        # (
-        #     all_detected_bboxes, all_detected_bbox_label_mask,
-        #     detected_class_ids, detected_logits
-        # ) = self._get_detected_objects(split, anno['scan_id'], augmentations)
+        (
+            all_detected_bboxes, all_detected_bbox_label_mask,
+            detected_class_ids, detected_logits
+        ) = self._get_detected_objects(split, anno['scan_id'], augmentations)
 
-        # # Assume a perfect object detector
-        # if self.butd_gt:
-        #     all_detected_bboxes = all_bboxes
-        #     all_detected_bbox_label_mask = all_bbox_label_mask
-        #     detected_class_ids = class_ids
+        # Assume a perfect object detector
+        if self.butd_gt:
+            all_detected_bboxes = all_bboxes
+            all_detected_bbox_label_mask = all_bbox_label_mask
+            detected_class_ids = class_ids
 
-        # # Assume a perfect object proposal stage
-        # if self.butd_cls:
-        #     all_detected_bboxes = all_bboxes
-        #     all_detected_bbox_label_mask = all_bbox_label_mask
-        #     detected_class_ids = np.zeros((len(all_bboxes,)))
-        #     classes = np.array(self.cls_results[anno['scan_id']])
-        #     # detected_class_ids[all_bbox_label_mask] = classes[classes > -1]
-        #     classes[classes == -1] = 325  # 'object' class
-        #     _k = all_bbox_label_mask.sum()
-        #     detected_class_ids[:_k] = classes[:_k]
+        # Assume a perfect object proposal stage
+        if self.butd_cls:
+            all_detected_bboxes = all_bboxes
+            all_detected_bbox_label_mask = all_bbox_label_mask
+            detected_class_ids = np.zeros((len(all_bboxes,)))
+            classes = np.array(self.cls_results[anno['scan_id']])
+            # detected_class_ids[all_bbox_label_mask] = classes[classes > -1]
+            classes[classes == -1] = 325  # 'object' class
+            _k = all_bbox_label_mask.sum()
+            detected_class_ids[:_k] = classes[:_k]
 
         # Visualize for debugging
         if self.visualize and anno['dataset'].startswith('sr3d'):
@@ -798,73 +728,65 @@ class Joint3DDataset(Dataset):
 
         # Return
         _labels = np.zeros(MAX_NUM_OBJ)
-        # if not isinstance(anno['target_id'], int) and not self.random_utt:
-        #     _labels[:len(anno['target_id'])] = np.array([
-        #         DC18.nyu40id2class[self.label_map18[
-        #             scan.get_object_instance_label(ind)
-        #         ]]
-        #         for ind in anno['target_id']
-        #     ])
-        _labels = class_ids
+        if not isinstance(anno['target_id'], int) and not self.random_utt:
+            _labels[:len(anno['target_id'])] = np.array([
+                DC18.nyu40id2class[self.label_map18[
+                    scan.get_object_instance_label(ind)
+                ]]
+                for ind in anno['target_id']
+            ])
         ret_dict = {
             'box_label_mask': box_label_mask.astype(np.float32),
             'center_label': gt_bboxes[:, :3].astype(np.float32),
             'sem_cls_label': _labels.astype(np.int64),
             'size_gts': gt_bboxes[:, 3:].astype(np.float32),
         }
-        try:
-            ret_dict.update({
-                "scan_ids": anno['scan_id'],
-                "point_clouds": point_cloud.astype(np.float32),
-                "utterances": (
-                    ' '.join(anno['utterance'].replace(',', ' ,').split())
-                    + ' . not mentioned'
-                ),
-                "positive_map": positive_map.astype(np.float32),
-                "relation": (
-                    self._find_rel(anno['utterance'])
-                    if anno['dataset'].startswith('sr3d')
-                    else "none"
-                ),
-                # "target_name": scan.get_object_instance_label(
-                #     anno['target_id'] if isinstance(anno['target_id'], int)
-                #     else anno['target_id'][0]
-                # ),
-                "target_name":  anno["target"],
-                "target_id": (
-                    anno['target_id'] if isinstance(anno['target_id'], int)
-                    else anno['target_id'][0]
-                ),
-                "point_instance_label": point_instance_label.astype(np.int64),
-                # "all_bboxes": all_bboxes.astype(np.float32),
-                # "all_bbox_label_mask": all_bbox_label_mask.astype(np.bool8),
-                # "all_class_ids": class_ids.astype(np.int64),
-                "distractor_ids": np.array(
-                    anno['distractor_ids']
-                    + [-1] * (32 - len(anno['distractor_ids']))
-                ).astype(int),
-                "anchor_ids": np.array(
-                    anno['anchor_ids']
-                    + [-1] * (32 - len(anno['anchor_ids']))
-                ).astype(int),
-                # "all_detected_boxes": all_detected_bboxes.astype(np.float32),
-                # "all_detected_bbox_label_mask": all_detected_bbox_label_mask.astype(np.bool8),
-                # "all_detected_class_ids": detected_class_ids.astype(np.int64),
-                # "all_detected_logits": detected_logits.astype(np.float32),
-                "is_view_dep": self._is_view_dep(anno['utterance']),
-                "is_hard": len(anno['distractor_ids']) > 1,
-                "is_unique": len(anno['distractor_ids']) == 0,
-                "target_cid": (
-                    class_ids[anno['target_id']]
-                    if isinstance(anno['target_id'], int)
-                    else class_ids[anno['target_id'][0]]
-                )
-            })
-        except Exception as e:
-            print(anno)
-            print(e)
-            exit()
-
+        ret_dict.update({
+            "scan_ids": anno['scan_id'],
+            "point_clouds": point_cloud.astype(np.float32),
+            "utterances": (
+                ' '.join(anno['utterance'].replace(',', ' ,').split())
+                + ' . not mentioned'
+            ),
+            "positive_map": positive_map.astype(np.float32),
+            "relation": (
+                self._find_rel(anno['utterance'])
+                if anno['dataset'].startswith('sr3d')
+                else "none"
+            ),
+            "target_name": scan.get_object_instance_label(
+                anno['target_id'] if isinstance(anno['target_id'], int)
+                else anno['target_id'][0]
+            ),
+            "target_id": (
+                anno['target_id'] if isinstance(anno['target_id'], int)
+                else anno['target_id'][0]
+            ),
+            "point_instance_label": point_instance_label.astype(np.int64),
+            "all_bboxes": all_bboxes.astype(np.float32),
+            "all_bbox_label_mask": all_bbox_label_mask.astype(np.bool8),
+            "all_class_ids": class_ids.astype(np.int64),
+            "distractor_ids": np.array(
+                anno['distractor_ids']
+                + [-1] * (32 - len(anno['distractor_ids']))
+            ).astype(int),
+            "anchor_ids": np.array(
+                anno['anchor_ids']
+                + [-1] * (32 - len(anno['anchor_ids']))
+            ).astype(int),
+            "all_detected_boxes": all_detected_bboxes.astype(np.float32),
+            "all_detected_bbox_label_mask": all_detected_bbox_label_mask.astype(np.bool8),
+            "all_detected_class_ids": detected_class_ids.astype(np.int64),
+            "all_detected_logits": detected_logits.astype(np.float32),
+            "is_view_dep": self._is_view_dep(anno['utterance']),
+            "is_hard": len(anno['distractor_ids']) > 1,
+            "is_unique": len(anno['distractor_ids']) == 0,
+            "target_cid": (
+                class_ids[anno['target_id']]
+                if isinstance(anno['target_id'], int)
+                else class_ids[anno['target_id'][0]]
+            )
+        })
         return ret_dict
 
     @staticmethod

@@ -154,3 +154,5 @@ sr3d_in_srf_format_*.json
 glove.p
 scanrefer_pred.json
 pred.json
+
+dataroot/

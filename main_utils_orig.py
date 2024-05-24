@@ -415,40 +415,9 @@ class BaseTrainTester:
         for batch_idx, batch_data in enumerate(train_loader):
             # Move to GPU
             batch_data = self._to_gpu(batch_data)
-            # es_mod
-            box_label_mask = batch_data['box_label_mask'] # torch.float32(24, 132)
-            center_label = batch_data['center_label'] # torch.float32(24, 132, 3)
-            sem_cls_label = batch_data['sem_cls_label'] # torch.int64(24, 132)
-            size_gts = batch_data['size_gts'] # torch.float32(24, 132, 3)
-            scan_ids = batch_data['scan_ids'] # list[str] len=24
-            point_clouds = batch_data['point_clouds'] # torch.float32(24, 50000, 6)
-            utterances = batch_data['utterances'] # list[str] len=24, each token in a string separated by space
-            positive_map = batch_data['positive_map'] # torch.float32(24, 132, 256)
-            relation = batch_data['relation'] # list[str] len=24
-            target_name = batch_data['target_name'] # list[str] len=24
-            target_id = batch_data['target_id'] # torch.int64(24)
-            point_instance_label = batch_data['point_instance_label'] # torch.int64(24, 50000)
-            # all_bboxes = batch_data['all_bboxes'] # torch.float32(24, 132, 6)
-            # all_bbox_label_mask = batch_data['all_bbox_label_mask'] # torch.bool(24, 132)
-            # all_class_ids = batch_data['all_class_ids'] # torch.int64(24, 132)
-            distractor_ids = batch_data['distractor_ids'] # torch.int64(24, 32)
-            anchor_ids = batch_data['anchor_ids'] # torch.int64(24, 32)
-            # all_detected_boxes = batch_data['all_detected_boxes'] # torch.float32(24, 132, 6)
-            # all_detected_bbox_label_mask = batch_data['all_detected_bbox_label_mask'] # torch.bool(24, 132)
-            # all_detected_class_ids = batch_data['all_detected_class_ids'] # torch.int64(24, 132)
-            # all_detected_logits = batch_data['all_detected_logits'] # torch.float32(24, 132, 485)
-            is_view_dep = batch_data['is_view_dep'] # torch.bool(24)
-            is_hard = batch_data['is_hard'] # torch.bool(24)
-            is_unique = batch_data['is_unique'] # torch.bool(24)
-            target_cid = batch_data['target_cid'] # torch.float64(24)
-
-            # for k, v in batch_data.items():
-            #     if isinstance(v, torch.Tensor):
-            #         print(f"{k} shape: {v.shape}")
-            #     elif isinstance(v, list):
-            #         print(f"{k} length: {len(v)}")
-            # Forward pass
             inputs = self._get_inputs(batch_data)
+
+            # Forward pass
             end_points = model(inputs)
 
             # Compute loss and gradients, update parameters.

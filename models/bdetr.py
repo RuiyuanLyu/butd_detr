@@ -49,7 +49,7 @@ class BeaUTyDETR(nn.Module):
                  num_decoder_layers=6, self_position_embedding='loc_learned',
                  contrastive_align_loss=True,
                  d_model=288, butd=True, pointnet_ckpt=None,
-                 self_attend=True):
+                 self_attend=True, box_dim=6, heading=False):
         """Initialize layers."""
         super().__init__()
 
@@ -58,7 +58,8 @@ class BeaUTyDETR(nn.Module):
         self.self_position_embedding = self_position_embedding
         self.contrastive_align_loss = contrastive_align_loss
         self.butd = butd
-
+        self.box_dim = box_dim
+        self.heading = heading
         # Visual encoder
         self.backbone_net = Pointnet2Backbone(
             input_feature_dim=input_feature_dim,
@@ -91,7 +92,7 @@ class BeaUTyDETR(nn.Module):
             self.butd_class_embeddings.weight.data.copy_(saved_embeddings)
             self.butd_class_embeddings.requires_grad = False
             self.class_embeddings = nn.Linear(768, d_model - 128)
-            self.box_embeddings = PositionEmbeddingLearned(6, 128)
+            self.box_embeddings = PositionEmbeddingLearned(self.box_dim, 128)
 
         # Cross-encoder
         self.pos_embed = PositionEmbeddingLearned(3, d_model)
@@ -111,7 +112,7 @@ class BeaUTyDETR(nn.Module):
         # Proposal (layer for size and center)
         self.proposal_head = ClsAgnosticPredictHead(
             num_class, 1, num_queries, d_model,
-            objectness=False, heading=False,
+            objectness=False, heading=self.heading,
             compute_sem_scores=True
         )
 

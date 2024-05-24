@@ -10,6 +10,7 @@
 # ------------------------------------------------------------------------
 
 import numpy as np
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -110,7 +111,7 @@ class ThreeLayerMLP(nn.Module):
 
 class ClsAgnosticPredictHead(nn.Module):
     def __init__(self, num_class, num_heading_bin, num_proposal,
-                 seed_feat_dim=256, objectness=True, heading=False,
+                 seed_feat_dim=256, objectness=True, heading=0,
                  compute_sem_scores=True):
         super().__init__()
 
@@ -125,9 +126,8 @@ class ClsAgnosticPredictHead(nn.Module):
         if objectness:
             self.objectness_scores_head = ThreeLayerMLP(seed_feat_dim, 1)
         self.center_residual_head = ThreeLayerMLP(seed_feat_dim, 3)
-        if heading:
-            self.heading_class_head = nn.Conv1d(seed_feat_dim, num_heading_bin, 1)
-            self.heading_residual_head = nn.Conv1d(seed_feat_dim, num_heading_bin, 1)
+        if heading: 
+            self.rotmat_pred_head = ThreeLayerMLP(seed_feat_dim, 6)
         self.size_pred_head = ThreeLayerMLP(seed_feat_dim, 3)
         if compute_sem_scores:
             self.sem_cls_scores_head = ThreeLayerMLP(seed_feat_dim, self.num_class)
@@ -155,13 +155,13 @@ class ClsAgnosticPredictHead(nn.Module):
 
         # heading
         if self.heading:
-            heading_scores = self.heading_class_head(net).transpose(2, 1)
-            # (batch_size, num_proposal, num_heading_bin) (should be -1 to 1)
-            heading_residuals_normalized = self.heading_residual_head(net).transpose(2, 1)
-            heading_residuals = heading_residuals_normalized * (np.pi / self.num_heading_bin)
-            end_points[f'{prefix}heading_scores'] = heading_scores
-            end_points[f'{prefix}heading_residuals_normalized'] = heading_residuals_normalized
-            end_points[f'{prefix}heading_residuals'] = heading_residuals
+            rotmat_pred = self.rotmat_pred_head(net).transpose(2, 1).view(
+                [batch_size, num_proposal, 6])  # (batch_size, num_proposal, 6)
+            x_raw, y_raw = rotmat_pred[..., :3], rotmat_pred[..., 3:] # (batch_size, num_proposal, 3)
+            rot_mat = ortho_6d_2_Mat(x_raw.view(batch_size, num_proposal, 3), y_raw.view(batch_size, num_proposal, 3))
+            euler = matrix_to_euler_angles(rot_mat, 'ZXY')
+            end_points[f'{prefix}rot_mat'] = rot_mat
+            end_points[f'{prefix}euler'] = euler
 
         # size
         pred_size = self.size_pred_head(net).transpose(2, 1).view(
@@ -178,3 +178,111 @@ class ClsAgnosticPredictHead(nn.Module):
         if self.compute_sem_scores:
             end_points[f'{prefix}sem_cls_scores'] = sem_cls_scores
         return center, pred_size
+
+
+def normalize_vector(vector):
+    norm = torch.norm(vector, dim=1, keepdim=True) + 1e-8
+    normalized_vector = vector / norm
+    return normalized_vector
+
+
+def cross_product(a, b):
+    cross_product = torch.cross(a, b, dim=1)
+    return cross_product
+
+
+def ortho_6d_2_Mat(x_raw, y_raw):
+    """x_raw, y_raw: both tensors (batch, 3)."""
+    y = normalize_vector(y_raw)
+    z = cross_product(x_raw, y)
+    z = normalize_vector(z)  # (batch, 3)
+    x = cross_product(y, z)  # (batch, 3)
+
+    x = x.unsqueeze(2)
+    y = y.unsqueeze(2)
+    z = z.unsqueeze(2)
+    matrix = torch.cat((x, y, z), 2)  # (batch, 3)
+    return matrix
+
+def _index_from_letter(letter: str) -> int:
+    if letter == "X":
+        return 0
+    if letter == "Y":
+        return 1
+    if letter == "Z":
+        return 2
+    raise ValueError("letter must be either X, Y or Z.")
+
+
+def _angle_from_tan(
+    axis: str, other_axis: str, data, horizontal: bool, tait_bryan: bool
+) -> torch.Tensor:
+    """
+    Extract the first or third Euler angle from the two members of
+    the matrix which are positive constant times its sine and cosine.
+
+    Args:
+        axis: Axis label "X" or "Y or "Z" for the angle we are finding.
+        other_axis: Axis label "X" or "Y or "Z" for the middle axis in the
+            convention.
+        data: Rotation matrices as tensor of shape (..., 3, 3).
+        horizontal: Whether we are looking for the angle for the third axis,
+            which means the relevant entries are in the same row of the
+            rotation matrix. If not, they are in the same column.
+        tait_bryan: Whether the first and third axes in the convention differ.
+
+    Returns:
+        Euler Angles in radians for each matrix in data as a tensor
+        of shape (...).
+    """
+
+    i1, i2 = {"X": (2, 1), "Y": (0, 2), "Z": (1, 0)}[axis]
+    if horizontal:
+        i2, i1 = i1, i2
+    even = (axis + other_axis) in ["XY", "YZ", "ZX"]
+    if horizontal == even:
+        return torch.atan2(data[..., i1], data[..., i2])
+    if tait_bryan:
+        return torch.atan2(-data[..., i2], data[..., i1])
+    return torch.atan2(data[..., i2], -data[..., i1])
+
+def matrix_to_euler_angles(matrix: torch.Tensor, convention: str) -> torch.Tensor:
+    """
+    Convert rotations given as rotation matrices to Euler angles in radians.
+
+    Args:
+        matrix: Rotation matrices as tensor of shape (..., 3, 3).
+        convention: Convention string of three uppercase letters.
+
+    Returns:
+        Euler angles in radians as tensor of shape (..., 3).
+    """
+    if len(convention) != 3:
+        raise ValueError("Convention must have 3 letters.")
+    if convention[1] in (convention[0], convention[2]):
+        raise ValueError(f"Invalid convention {convention}.")
+    for letter in convention:
+        if letter not in ("X", "Y", "Z"):
+            raise ValueError(f"Invalid letter {letter} in convention string.")
+    if matrix.size(-1) != 3 or matrix.size(-2) != 3:
+        raise ValueError(f"Invalid rotation matrix shape {matrix.shape}.")
+    i0 = _index_from_letter(convention[0])
+    i2 = _index_from_letter(convention[2])
+    tait_bryan = i0 != i2
+    if tait_bryan:
+        central_angle = torch.asin(
+            matrix[..., i0, i2] * (-1.0 if i0 - i2 in [-1, 2] else 1.0)
+        )
+    else:
+        central_angle = torch.acos(matrix[..., i0, i0])
+
+    o = (
+        _angle_from_tan(
+            convention[0], convention[1], matrix[..., i2], False, tait_bryan
+        ),
+        central_angle,
+        _angle_from_tan(
+            convention[2], convention[1], matrix[..., i0, :], True, tait_bryan
+        ),
+    )
+    return torch.stack(o, -1)

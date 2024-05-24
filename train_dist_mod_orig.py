@@ -18,7 +18,7 @@ import torch.distributed as dist
 
 from main_utils import parse_option, BaseTrainTester
 from data.model_util_scannet import ScannetDatasetConfig
-from src.joint_det_dataset import Joint3DDataset
+from src.joint_det_dataset_orig import Joint3DDataset
 from src.grounding_evaluator import GroundingEvaluator, GroundingGTEvaluator
 from models import BeaUTyDETR
 from models import APCalculator, parse_predictions, parse_groundtruths
@@ -56,24 +56,21 @@ class TrainTester(BaseTrainTester):
             butd=args.butd,
             butd_gt=args.butd_gt,
             butd_cls=args.butd_cls,
-            augment_det=args.augment_det,
-            es_info_file="/mnt/petrelfs/lvruiyuan/embodiedscan_infos/embodiedscan_infos_train_full.pkl"
+            augment_det=args.augment_det
         )
-        test_dataset=train_dataset
-        # test_dataset = Joint3DDataset(
-        #     dataset_dict=dataset_dict,
-        #     test_dataset=args.test_dataset,
-        #     split='val' if not args.eval_train else 'train',
-        #     use_color=args.use_color, use_height=args.use_height,
-        #     overfit=args.debug,
-        #     data_path=args.data_root,
-        #     detect_intermediate=args.detect_intermediate,
-        #     use_multiview=args.use_multiview,
-        #     butd=args.butd,
-        #     butd_gt=args.butd_gt,
-        #     butd_cls=args.butd_cls,
-        #     es_info_file="/mnt/petrelfs/lvruiyuan/embodiedscan_infos/embodiedscan_infos_val_full.pkl"
-        # )
+        test_dataset = Joint3DDataset(
+            dataset_dict=dataset_dict,
+            test_dataset=args.test_dataset,
+            split='val' if not args.eval_train else 'train',
+            use_color=args.use_color, use_height=args.use_height,
+            overfit=args.debug,
+            data_path=args.data_root,
+            detect_intermediate=args.detect_intermediate,
+            use_multiview=args.use_multiview,
+            butd=args.butd,
+            butd_gt=args.butd_gt,
+            butd_cls=args.butd_cls
+        )
         return train_dataset, test_dataset
 
     @staticmethod
@@ -90,7 +87,7 @@ class TrainTester(BaseTrainTester):
             num_class = 19
         model = BeaUTyDETR(
             num_class=num_class,
-            num_obj_class=288,
+            num_obj_class=485,
             input_feature_dim=num_input_channel,
             num_queries=args.num_target,
             num_decoder_layers=args.num_decoder_layers,
@@ -98,9 +95,7 @@ class TrainTester(BaseTrainTester):
             contrastive_align_loss=args.use_contrastive_align,
             butd=args.butd or args.butd_gt or args.butd_cls,
             pointnet_ckpt=args.pp_checkpoint,
-            self_attend=args.self_attend,
-            heading=True,
-            box_dim=9,
+            self_attend=args.self_attend
         )
         return model
 
@@ -109,10 +104,9 @@ class TrainTester(BaseTrainTester):
         return {
             'point_clouds': batch_data['point_clouds'].float(),
             'text': batch_data['utterances'],
-            # es_mod
-            # "det_boxes": batch_data['all_detected_boxes'],
-            # "det_bbox_label_mask": batch_data['all_detected_bbox_label_mask'],
-            # "det_class_ids": batch_data['all_detected_class_ids']
+            "det_boxes": batch_data['all_detected_boxes'],
+            "det_bbox_label_mask": batch_data['all_detected_bbox_label_mask'],
+            "det_class_ids": batch_data['all_detected_class_ids']
         }
 
     @torch.no_grad()
@@ -233,7 +227,6 @@ class TrainTester(BaseTrainTester):
             end_points['last_sem_cls_scores'] = sem_scores
             # end contrast
             sem_cls = torch.zeros_like(end_points['last_sem_cls_scores'])[..., :19]
-            # TODO: fix this; last_sem_cls_scores are wrong, since the class idx have changed
             for w, t in zip(wordidx, tokenidx):
                 sem_cls[..., w] += end_points['last_sem_cls_scores'][..., t]
             end_points['last_sem_cls_scores'] = sem_cls
