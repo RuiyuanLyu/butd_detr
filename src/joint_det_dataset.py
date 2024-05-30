@@ -54,7 +54,7 @@ class Joint3DDataset(Dataset):
         self.use_height = use_height
         self.overfit = overfit
         self.detect_intermediate = detect_intermediate
-        self.augment = self.split == 'train'
+        self.augment = False # self.split == 'train'     # HACK yesname
         self.use_multiview = use_multiview
         self.data_path = data_path
         self.visualize = False  # manually set this to True to debug
@@ -139,15 +139,17 @@ class Joint3DDataset(Dataset):
     def load_es_annos(self):
         """Load annotations of embodiedscan. es_mod"""
         # es_vg_path = "/mnt/hwfile/OpenRobotLab/lvruiyuan/es_gen_text/VG.json"
-        es_vg_path = f"/mnt/petrelfs/lvruiyuan/embodiedscan_infos/embodiedscan_{self.split}_mini_vg.json"
+        es_vg_path = f"/mnt/hwfile/OpenRobotLab/lvruiyuan/es_gen_text/vg_full/VG_{self.split}_10Percent_flattened_token_positive.json"
         with open(es_vg_path, 'r') as f:
             es_vg = json.load(f)
         # {"scan_id": "scene0000_00", "target_id": [7], "distractor_ids": [], "text": "choose the curtain that is above the desk", "target": ["curtain"], "anchors": ["desk"], "anchor_ids": [8], "tokens_positive": [[11, 18], [37, 41]]}
 
         annos = []
-        for i, anno in enumerate(es_vg):
+        for i, anno in enumerate(es_vg):    # TODO yesname
             # if i % SAMPLE_RATE != 0:
             #     continue
+            if len(anno['target_id']) <= 0:
+                continue
             scan_id = anno['scan_id']
             scan_id = to_scene_id(scan_id)
             scan_id = NUM2RAW_3RSCAN.get(scan_id, scan_id)
@@ -155,12 +157,9 @@ class Joint3DDataset(Dataset):
                 print(f"drop due to scan id {scan_id}")
                 continue
             obj_ids = list(self.es_info[scan_id]["object_ids"])
-            target_id = anno['target_id'][0] if isinstance(anno['target_id'], list) else anno['target_id']
+            target_id = anno['target_id']
             anchor_ids = anno['anchor_ids']
-            if not isinstance(target_id, int):
-                print(f"drop due to target id {target_id}")
-                continue
-            target_index = obj_ids.index(target_id)
+            target_index = [obj_ids.index(tar_id) for tar_id in target_id]
             if isinstance(anchor_ids, int):
                 anchor_ids = [anchor_ids]
             try:
@@ -168,20 +167,21 @@ class Joint3DDataset(Dataset):
             except ValueError: # some anchor ids is broken
                 print(f"drop due to anchor id fail indexing {anchor_ids}")
                 continue 
-            if target_index >= MAX_NUM_OBJ or (np.array(anchor_indices)>=MAX_NUM_OBJ).any():
-                print(f"drop due to too many objects")
-                continue
+            # if target_index >= MAX_NUM_OBJ or (np.array(anchor_indices)>=MAX_NUM_OBJ).any():
+            #     # print(f"drop due to too many objects")
+            #     continue
             out_dict = {
                 'scan_id': scan_id,
                 'target_id': target_index,
                 'distractor_ids': anno['distractor_ids'],
                 'utterance': anno['text'],
-                'target': anno['target'][0] if isinstance(anno['target'], list) else anno['target'],
+                'target': anno['target'],
                 'anchors': anno['anchors'],
                 'anchor_ids': anchor_indices,
                 'dataset': "es",
                 'pred_pos_map': anno['tokens_positive'],  # span
                 'span_utterance': anno['text'], # es mod: 
+                'sub_class' :  anno.get("sub_class", "other")
             }
             annos.append(out_dict)
         return annos
@@ -419,6 +419,7 @@ class Joint3DDataset(Dataset):
         return self.multiview_data[pid][scan_id]
 
     def _augment(self, pc, color, rotate):
+        raise NotImplementedError()
         augmentations = {}
 
         # Rotate/flip only if we don't have a view_dep sentence
@@ -522,6 +523,7 @@ class Joint3DDataset(Dataset):
             if quick_load: returns full-context point_cloud, augmentations, color.
             else: returns pc, color, instance_ids, obj_masks 
         """
+        augmentations = None
         if not hasattr(self, 'scan_gt_pcd_data'):
             self.scan_gt_pcd_data = {}
         if scan_id in self.scan_gt_pcd_data:
@@ -810,7 +812,9 @@ class Joint3DDataset(Dataset):
             'box_label_mask': box_label_mask.astype(np.float32),
             'center_label': gt_bboxes[:, :3].astype(np.float32),
             'sem_cls_label': _labels.astype(np.int64),
-            'size_gts': gt_bboxes[:, 3:].astype(np.float32),
+            'size_gts': gt_bboxes[:, 3:6].astype(np.float32),
+            'euler_gts': gt_bboxes[:, 6:].astype(np.float32),
+            'sub_class': anno['sub_class']
         }
         try:
             ret_dict.update({
@@ -830,11 +834,11 @@ class Joint3DDataset(Dataset):
                 #     anno['target_id'] if isinstance(anno['target_id'], int)
                 #     else anno['target_id'][0]
                 # ),
-                "target_name":  anno["target"],
-                "target_id": (
-                    anno['target_id'] if isinstance(anno['target_id'], int)
-                    else anno['target_id'][0]
-                ),
+                # "target_name":  anno["target"],
+                # "target_id": (
+                #     anno['target_id'] if isinstance(anno['target_id'], int)
+                #     else anno['target_id'][0]
+                # ),
                 "point_instance_label": point_instance_label.astype(np.int64),
                 # "all_bboxes": all_bboxes.astype(np.float32),
                 # "all_bbox_label_mask": all_bbox_label_mask.astype(np.bool8),

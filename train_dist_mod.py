@@ -22,10 +22,7 @@ from src.joint_det_dataset import Joint3DDataset
 from src.grounding_evaluator import GroundingEvaluator, GroundingGTEvaluator
 from models import BeaUTyDETR
 from models import APCalculator, parse_predictions, parse_groundtruths
-
-
-import ipdb
-st = ipdb.set_trace
+from src.grounding_metric import ground_eval
 
 
 class TrainTester(BaseTrainTester):
@@ -57,7 +54,7 @@ class TrainTester(BaseTrainTester):
             butd_gt=args.butd_gt,
             butd_cls=args.butd_cls,
             augment_det=args.augment_det,
-            es_info_file="/mnt/petrelfs/lvruiyuan/embodiedscan_infos/embodiedscan_infos_train_full.pkl"
+            es_info_file="/mnt/hwfile/OpenRobotLab/lvruiyuan/embodiedscan_infos/embodiedscan_infos_train_full.pkl"
         )
         test_dataset=train_dataset
         # test_dataset = Joint3DDataset(
@@ -72,7 +69,7 @@ class TrainTester(BaseTrainTester):
         #     butd=args.butd,
         #     butd_gt=args.butd_gt,
         #     butd_cls=args.butd_cls,
-        #     es_info_file="/mnt/petrelfs/lvruiyuan/embodiedscan_infos/embodiedscan_infos_val_full.pkl"
+        #     es_info_file="/mnt/hwfile/OpenRobotLab/lvruiyuan/embodiedscan_infos/embodiedscan_infos_val_full.pkl"
         # )
         return train_dataset, test_dataset
 
@@ -150,6 +147,11 @@ class TrainTester(BaseTrainTester):
             )
 
         # Main eval branch
+        pred_res = dict()
+        gt_res = dict()
+        for prefix in prefixes:
+            pred_res[prefix] = []
+            gt_res[prefix] = []
         for batch_idx, batch_data in enumerate(test_loader):
             stat_dict, end_points = self._main_eval_branch(
                 batch_idx, batch_data, test_loader, model, stat_dict,
@@ -157,11 +159,17 @@ class TrainTester(BaseTrainTester):
             )
             if evaluator is not None:
                 for prefix in prefixes:
-                    evaluator.evaluate(end_points, prefix)
-        evaluator.synchronize_between_processes()
-        if dist.get_rank() == 0:
-            if evaluator is not None:
-                evaluator.print_stats()
+                    pred_sample, gt_sample = evaluator.evaluate(end_points, prefix)
+                    pred_res[prefix] += pred_sample
+                    gt_res[prefix] += gt_sample
+        
+        for prefix in prefixes:
+            self.logger.info('Eval ' + str(prefix) + ' results:' + '\n')
+            ground_eval(gt_res[prefix], pred_res[prefix], self.logger)
+        
+        # if dist.get_rank() == 0:
+        #     if evaluator is not None:
+        #         evaluator.print_stats()
         return None
 
     @torch.no_grad()
@@ -174,6 +182,7 @@ class TrainTester(BaseTrainTester):
             model: a nn.Module that returns end_points (dict)
             criterion: a function that returns (loss, end_points)
         """
+        raise NotImplementedError
         dataset_config = ScannetDatasetConfig(18)
         # Used for AP calculation
         CONFIG_DICT = {
@@ -288,11 +297,11 @@ class TrainTester(BaseTrainTester):
 if __name__ == '__main__':
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     opt = parse_option()
-    torch.cuda.set_device(opt.local_rank)
-    torch.distributed.init_process_group(backend='nccl', init_method='env://')
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = True
+    # torch.cuda.set_device(opt.local_rank)
+    # torch.distributed.init_process_group(backend='nccl', init_method='env://')
+    # torch.backends.cudnn.enabled = True
+    # torch.backends.cudnn.benchmark = True
+    # torch.backends.cudnn.deterministic = True
 
     train_tester = TrainTester(opt)
     ckpt_path = train_tester.main(opt)

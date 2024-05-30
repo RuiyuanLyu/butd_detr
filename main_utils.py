@@ -21,7 +21,7 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-import torch.distributed as dist
+# import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from models import HungarianMatcher, SetCriterion, compute_hungarian_loss
@@ -176,11 +176,11 @@ class BaseTrainTester:
 
         # Create logger
         self.logger = setup_logger(
-            output=args.log_dir, distributed_rank=dist.get_rank(),
+            output=args.log_dir,
             name=name
         )
         # Save config file and initialize tb writer
-        if dist.get_rank() == 0:
+        if True: #if dist.get_rank() == 0:
             path = os.path.join(args.log_dir, "config.json")
             with open(path, 'w') as f:
                 json.dump(vars(args), f, indent=2)
@@ -206,7 +206,7 @@ class BaseTrainTester:
         # Samplers and loaders
         g = torch.Generator()
         g.manual_seed(0)
-        train_sampler = DistributedSampler(train_dataset)
+        # train_sampler = DistributedSampler(train_dataset)
         train_loader = DataLoader(
             train_dataset,
             batch_size=args.batch_size,
@@ -214,11 +214,11 @@ class BaseTrainTester:
             num_workers=args.num_workers,
             worker_init_fn=seed_worker,
             pin_memory=True,
-            sampler=train_sampler,
+            # sampler=train_sampler,
             drop_last=True,
             generator=g
         )
-        test_sampler = DistributedSampler(test_dataset, shuffle=False)
+        # test_sampler = DistributedSampler(test_dataset, shuffle=False)
         test_loader = DataLoader(
             test_dataset,
             batch_size=args.batch_size,
@@ -226,7 +226,7 @@ class BaseTrainTester:
             num_workers=args.num_workers,
             worker_init_fn=seed_worker,
             pin_memory=True,
-            sampler=test_sampler,
+            # sampler=test_sampler,
             drop_last=False,
             generator=g
         )
@@ -307,10 +307,10 @@ class BaseTrainTester:
         # Move model to devices
         if torch.cuda.is_available():
             model = model.cuda()
-        model = DistributedDataParallel(
-            model, device_ids=[args.local_rank],
-            broadcast_buffers=False  # , find_unused_parameters=True
-        )
+        # model = DistributedDataParallel(
+        #     model, device_ids=[args.local_rank],
+        #     broadcast_buffers=False  # , find_unused_parameters=True
+        # )
 
         # Check for a checkpoint
         if args.checkpoint_path:
@@ -328,7 +328,7 @@ class BaseTrainTester:
 
         # Training loop
         for epoch in range(args.start_epoch, args.max_epoch + 1):
-            train_loader.sampler.set_epoch(epoch)
+            # train_loader.sampler.set_epoch(epoch)
             tic = time.time()
             self.train_one_epoch(
                 epoch, train_loader, model,
@@ -344,7 +344,7 @@ class BaseTrainTester:
                 )
             )
             if epoch % args.val_freq == 0:
-                if dist.get_rank() == 0:  # save model
+                if True: # if dist.get_rank() == 0:  # save model
                     save_checkpoint(args, epoch, model, optimizer, scheduler)
                 print("Test evaluation.......")
                 self.evaluate_one_epoch(
@@ -416,31 +416,31 @@ class BaseTrainTester:
             # Move to GPU
             batch_data = self._to_gpu(batch_data)
             # es_mod
-            box_label_mask = batch_data['box_label_mask'] # torch.float32(24, 132)
-            center_label = batch_data['center_label'] # torch.float32(24, 132, 3)
-            sem_cls_label = batch_data['sem_cls_label'] # torch.int64(24, 132)
-            size_gts = batch_data['size_gts'] # torch.float32(24, 132, 3)
-            scan_ids = batch_data['scan_ids'] # list[str] len=24
-            point_clouds = batch_data['point_clouds'] # torch.float32(24, 50000, 6)
-            utterances = batch_data['utterances'] # list[str] len=24, each token in a string separated by space
-            positive_map = batch_data['positive_map'] # torch.float32(24, 132, 256)
-            relation = batch_data['relation'] # list[str] len=24
-            target_name = batch_data['target_name'] # list[str] len=24
-            target_id = batch_data['target_id'] # torch.int64(24)
-            point_instance_label = batch_data['point_instance_label'] # torch.int64(24, 50000)
-            # all_bboxes = batch_data['all_bboxes'] # torch.float32(24, 132, 6)
-            # all_bbox_label_mask = batch_data['all_bbox_label_mask'] # torch.bool(24, 132)
-            # all_class_ids = batch_data['all_class_ids'] # torch.int64(24, 132)
-            distractor_ids = batch_data['distractor_ids'] # torch.int64(24, 32)
-            anchor_ids = batch_data['anchor_ids'] # torch.int64(24, 32)
-            # all_detected_boxes = batch_data['all_detected_boxes'] # torch.float32(24, 132, 6)
-            # all_detected_bbox_label_mask = batch_data['all_detected_bbox_label_mask'] # torch.bool(24, 132)
-            # all_detected_class_ids = batch_data['all_detected_class_ids'] # torch.int64(24, 132)
-            # all_detected_logits = batch_data['all_detected_logits'] # torch.float32(24, 132, 485)
-            is_view_dep = batch_data['is_view_dep'] # torch.bool(24)
-            is_hard = batch_data['is_hard'] # torch.bool(24)
-            is_unique = batch_data['is_unique'] # torch.bool(24)
-            target_cid = batch_data['target_cid'] # torch.float64(24)
+            # box_label_mask = batch_data['box_label_mask'] # torch.float32(24, 132)
+            # center_label = batch_data['center_label'] # torch.float32(24, 132, 3)
+            # sem_cls_label = batch_data['sem_cls_label'] # torch.int64(24, 132)
+            # size_gts = batch_data['size_gts'] # torch.float32(24, 132, 3)
+            # scan_ids = batch_data['scan_ids'] # list[str] len=24
+            # point_clouds = batch_data['point_clouds'] # torch.float32(24, 50000, 6)
+            # utterances = batch_data['utterances'] # list[str] len=24, each token in a string separated by space
+            # positive_map = batch_data['positive_map'] # torch.float32(24, 132, 256)
+            # relation = batch_data['relation'] # list[str] len=24
+            # target_name = batch_data['target_name'] # list[str] len=24
+            # target_id = batch_data['target_id'] # torch.int64(24)
+            # point_instance_label = batch_data['point_instance_label'] # torch.int64(24, 50000)
+            # # all_bboxes = batch_data['all_bboxes'] # torch.float32(24, 132, 6)
+            # # all_bbox_label_mask = batch_data['all_bbox_label_mask'] # torch.bool(24, 132)
+            # # all_class_ids = batch_data['all_class_ids'] # torch.int64(24, 132)
+            # distractor_ids = batch_data['distractor_ids'] # torch.int64(24, 32)
+            # anchor_ids = batch_data['anchor_ids'] # torch.int64(24, 32)
+            # # all_detected_boxes = batch_data['all_detected_boxes'] # torch.float32(24, 132, 6)
+            # # all_detected_bbox_label_mask = batch_data['all_detected_bbox_label_mask'] # torch.bool(24, 132)
+            # # all_detected_class_ids = batch_data['all_detected_class_ids'] # torch.int64(24, 132)
+            # # all_detected_logits = batch_data['all_detected_logits'] # torch.float32(24, 132, 485)
+            # is_view_dep = batch_data['is_view_dep'] # torch.bool(24)
+            # is_hard = batch_data['is_hard'] # torch.bool(24)
+            # is_unique = batch_data['is_unique'] # torch.bool(24)
+            # target_cid = batch_data['target_cid'] # torch.float64(24)
 
             # for k, v in batch_data.items():
             #     if isinstance(v, torch.Tensor):

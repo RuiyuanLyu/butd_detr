@@ -158,14 +158,16 @@ class ClsAgnosticPredictHead(nn.Module):
             rotmat_pred = self.rotmat_pred_head(net).transpose(2, 1).view(
                 [batch_size, num_proposal, 6])  # (batch_size, num_proposal, 6)
             x_raw, y_raw = rotmat_pred[..., :3], rotmat_pred[..., 3:] # (batch_size, num_proposal, 3)
-            rot_mat = ortho_6d_2_Mat(x_raw.view(batch_size, num_proposal, 3), y_raw.view(batch_size, num_proposal, 3))
-            euler = matrix_to_euler_angles(rot_mat, 'ZXY')
-            end_points[f'{prefix}rot_mat'] = rot_mat
-            end_points[f'{prefix}euler'] = euler
+            x_raw = x_raw.reshape(-1, 3)
+            y_raw = y_raw.reshape(-1, 3)
+            rot_mat = ortho_6d_2_Mat(x_raw, y_raw)
+            # euler = matrix_to_euler_angles(rot_mat, 'ZXY').reshape(batch_size, -1, 3)
+            end_points[f'{prefix}rot_mat'] = rot_mat.reshape(batch_size, -1, 3,3)
+            # end_points[f'{prefix}euler'] = euler
 
         # size
         pred_size = self.size_pred_head(net).transpose(2, 1).view(
-            [batch_size, num_proposal, 3])  # (batch_size, num_proposal, 3)
+            [batch_size, num_proposal, 3]).clamp(min=2e-2)  # (batch_size, num_proposal, 3)
 
         # class
         if self.compute_sem_scores:

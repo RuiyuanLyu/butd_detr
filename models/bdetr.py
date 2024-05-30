@@ -130,7 +130,7 @@ class BeaUTyDETR(nn.Module):
         for _ in range(self.num_decoder_layers):
             self.prediction_heads.append(ClsAgnosticPredictHead(
                 num_class, 1, num_queries, d_model,
-                objectness=False, heading=False,
+                objectness=False, heading=self.heading,
                 compute_sem_scores=True
             ))
 

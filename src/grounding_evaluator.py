@@ -10,6 +10,7 @@ import torch
 
 from models.losses import _iou3d_par, box_cxcyczwhd_to_xyzxyz
 import utils.misc as misc
+from pytorch3d.transforms import euler_angles_to_matrix
 
 import ipdb
 st = ipdb.set_trace
@@ -104,7 +105,7 @@ class GroundingEvaluator:
             end_points (dict): contains predictions and gt
             prefix (str): layer name
         """
-        self.evaluate_bbox_by_span(end_points, prefix)
+        return self.evaluate_bbox_by_span(end_points, prefix)
         self.evaluate_bbox_by_contrast(end_points, prefix)
 
     def evaluate_bbox_by_span(self, end_points, prefix):
@@ -116,7 +117,7 @@ class GroundingEvaluator:
             prefix (str): layer name
         """
         # Parse gt
-        positive_map, gt_bboxes = self._parse_gt(end_points)
+        positive_map, gt_center, gt_size, gt_rotmat = self._parse_gt(end_points)
 
         # Parse predictions
         sem_scores = end_points[f'{prefix}sem_cls_scores'].softmax(-1)
@@ -127,43 +128,62 @@ class GroundingEvaluator:
                 positive_map.shape[-1]).to(sem_scores.device)
             sem_scores_[:, :, :sem_scores.shape[-1]] = sem_scores
             sem_scores = sem_scores_
+        
+        pred_scores, _ = torch.max(sem_scores, dim=-1)
 
         # Parse predictions
         pred_center = end_points[f'{prefix}center']  # B, Q, 3
         pred_size = end_points[f'{prefix}pred_size']  # (B,Q,3) (l,w,h)
+        pred_rotmat = end_points[f'{prefix}rot_mat'] # (B, Q, 3, 3)
         assert (pred_size < 0).sum() == 0
         pred_bbox = torch.cat([pred_center, pred_size], dim=-1)
 
         # Highest scoring box -> iou
-        for bid in range(len(positive_map)):
+        pred_res = []
+        gt_res = []
+        for bid in range(len(positive_map)):    # bid = batch_id
+            print(pred_center.shape)
+            print(pred_size.shape)
+            print(pred_rotmat.shape)
+            print(pred_scores.shape)
+            print(bid)
+            pred_res.append({'center': pred_center[bid].detach().cpu(), 'size': pred_size[bid].detach().cpu(), 'rot': pred_rotmat[bid].detach().cpu(), 'score': pred_scores[bid].detach().cpu()})
             # Keep scores for annotated objects only
             num_obj = int(end_points['box_label_mask'][bid].sum())
-            pmap = positive_map[bid, :num_obj]
-            scores = (
-                sem_scores[bid].unsqueeze(0)  # (1, Q, 256)
-                * pmap.unsqueeze(1)  # (obj, 1, 256)
-            ).sum(-1)  # (obj, Q)
+            gt_center_single = gt_center[bid, :num_obj]
+            gt_size_single = gt_size[bid, :num_obj]
+            gt_rotmat_single = gt_rotmat[bid, :num_obj]
+            gt_res.append({'center': gt_center_single.cpu(), 'size': gt_size_single.cpu(), 'rot': gt_rotmat_single.cpu(), 'sub_class': end_points['sub_class'][bid]})
+            continue
+        
+        return pred_res, gt_res
+            
+            # pmap = positive_map[bid, :num_obj]
+            # scores = (
+            #     sem_scores[bid].unsqueeze(0)  # (1, Q, 256)
+            #     * pmap.unsqueeze(1)  # (obj, 1, 256)
+            # ).sum(-1)  # (obj, Q)
 
-            # 10 predictions per gt box
-            top = scores.argsort(1, True)[:, :10]  # (obj, 10)
-            pbox = pred_bbox[bid, top.reshape(-1)]
+            # # 10 predictions per gt box
+            # top = scores.argsort(1, True)[:, :10]  # (obj, 10)
+            # pbox = pred_bbox[bid, top.reshape(-1)]
 
-            # IoU
-            ious, _ = _iou3d_par(
-                box_cxcyczwhd_to_xyzxyz(gt_bboxes[bid][:num_obj]),  # (obj, 6)
-                box_cxcyczwhd_to_xyzxyz(pbox)  # (obj*10, 6)
-            )  # (obj, obj*10)
-            ious = ious.reshape(top.size(0), top.size(0), top.size(1))
-            ious = ious[torch.arange(len(ious)), torch.arange(len(ious))]
+            # # IoU
+            # ious, _ = _iou3d_par(
+            #     box_cxcyczwhd_to_xyzxyz(gt_bboxes[bid][:num_obj]),  # (obj, 6)
+            #     box_cxcyczwhd_to_xyzxyz(pbox)  # (obj*10, 6)
+            # )  # (obj, obj*10)
+            # ious = ious.reshape(top.size(0), top.size(0), top.size(1))
+            # ious = ious[torch.arange(len(ious)), torch.arange(len(ious))]
 
-            # Measure IoU>threshold, ious are (obj, 10)
-            topks = self.topks
-            for t in self.thresholds:
-                thresholded = ious > t
-                for k in topks:
-                    found = thresholded[:, :k].any(1)
-                    self.dets[(prefix, t, k, 'bbs')] += found.sum().item()
-                    self.gts[(prefix, t, k, 'bbs')] += len(thresholded)
+            # # Measure IoU>threshold, ious are (obj, 10)
+            # topks = self.topks
+            # for t in self.thresholds:
+            #     thresholded = ious > t
+            #     for k in topks:
+            #         found = thresholded[:, :k].any(1)
+            #         self.dets[(prefix, t, k, 'bbs')] += found.sum().item()
+            #         self.gts[(prefix, t, k, 'bbs')] += len(thresholded)
 
     def evaluate_bbox_by_contrast(self, end_points, prefix):
         """
@@ -190,6 +210,8 @@ class GroundingEvaluator:
         sem_scores = sem_scores.to(sem_scores_.device)
         sem_scores[:, :sem_scores_.size(1), :sem_scores_.size(2)] = sem_scores_
 
+        import pdb
+        pdb.set_trace()
         # Highest scoring box -> iou
         for bid in range(len(positive_map)):
             # Keep scores for annotated objects only
@@ -246,11 +268,12 @@ class GroundingEvaluator:
         positive_map[positive_map > 0] = 1
         gt_center = end_points['center_label'][:, :, 0:3]  # (B, K, 3)
         gt_size = end_points['size_gts']  # (B, K2,3)
-        gt_bboxes = torch.cat([gt_center, gt_size], dim=-1)  # cxcyczwhd
-        if self.only_root:
-            positive_map = positive_map[:, :1]  # (B, 1, 256)
-            gt_bboxes = gt_bboxes[:, :1]  # (B, 1, 6)
-        return positive_map, gt_bboxes
+        gt_rotmat = euler_angles_to_matrix(end_points['euler_gts'], 'ZXY')
+        # gt_bboxes = torch.cat([gt_center, gt_size], dim=-1)  # cxcyczwhd
+        # if self.only_root:
+        #     positive_map = positive_map[:, :1]  # (B, 1, 256)
+        #     gt_bboxes = gt_bboxes[:, :1]  # (B, 1, 6)
+        return positive_map, gt_center, gt_size, gt_rotmat
 
 
 class GroundingGTEvaluator:
