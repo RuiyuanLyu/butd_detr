@@ -22,7 +22,9 @@ from src.joint_det_dataset import Joint3DDataset
 from src.grounding_evaluator import GroundingEvaluator, GroundingGTEvaluator
 from models import BeaUTyDETR
 from models import APCalculator, parse_predictions, parse_groundtruths
+import utils.misc as misc
 from src.grounding_metric import ground_eval
+from tqdm import tqdm
 
 
 class TrainTester(BaseTrainTester):
@@ -44,7 +46,7 @@ class TrainTester(BaseTrainTester):
         train_dataset = Joint3DDataset(
             dataset_dict=dataset_dict,
             test_dataset=args.test_dataset,
-            split='train' if not args.debug else 'val',
+            split='train' if not args.debug else 'val_to_train',
             use_color=args.use_color, use_height=args.use_height,
             overfit=args.debug,
             data_path=args.data_root,
@@ -56,21 +58,20 @@ class TrainTester(BaseTrainTester):
             augment_det=args.augment_det,
             es_info_file="/mnt/hwfile/OpenRobotLab/lvruiyuan/embodiedscan_infos/embodiedscan_infos_train_full.pkl"
         )
-        test_dataset=train_dataset
-        # test_dataset = Joint3DDataset(
-        #     dataset_dict=dataset_dict,
-        #     test_dataset=args.test_dataset,
-        #     split='val' if not args.eval_train else 'train',
-        #     use_color=args.use_color, use_height=args.use_height,
-        #     overfit=args.debug,
-        #     data_path=args.data_root,
-        #     detect_intermediate=args.detect_intermediate,
-        #     use_multiview=args.use_multiview,
-        #     butd=args.butd,
-        #     butd_gt=args.butd_gt,
-        #     butd_cls=args.butd_cls,
-        #     es_info_file="/mnt/hwfile/OpenRobotLab/lvruiyuan/embodiedscan_infos/embodiedscan_infos_val_full.pkl"
-        # )
+        test_dataset = Joint3DDataset(
+            dataset_dict=dataset_dict,
+            test_dataset=args.test_dataset,
+            split='val' if not args.eval_train else 'train',
+            use_color=args.use_color, use_height=args.use_height,
+            overfit=args.debug,
+            data_path=args.data_root,
+            detect_intermediate=args.detect_intermediate,
+            use_multiview=args.use_multiview,
+            butd=args.butd,
+            butd_gt=args.butd_gt,
+            butd_cls=args.butd_cls,
+            es_info_file="/mnt/hwfile/OpenRobotLab/lvruiyuan/embodiedscan_infos/embodiedscan_infos_train_full.pkl"
+        )
         return train_dataset, test_dataset
 
     @staticmethod
@@ -107,9 +108,9 @@ class TrainTester(BaseTrainTester):
             'point_clouds': batch_data['point_clouds'].float(),
             'text': batch_data['utterances'],
             # es_mod
-            # "det_boxes": batch_data['all_detected_boxes'],
-            # "det_bbox_label_mask": batch_data['all_detected_bbox_label_mask'],
-            # "det_class_ids": batch_data['all_detected_class_ids']
+            "det_boxes": batch_data['all_detected_boxes'],
+            "det_bbox_label_mask": batch_data['all_detected_bbox_label_mask'],
+            "det_class_ids": batch_data['all_detected_class_ids']
         }
 
     @torch.no_grad()
@@ -128,15 +129,17 @@ class TrainTester(BaseTrainTester):
                 criterion, set_criterion, args
             )
         stat_dict = {}
+        assert dist.get_world_size() == 1
         model.eval()  # set model to eval mode (for bn and dp)
 
-        if args.num_decoder_layers > 0:
-            prefixes = ['last_', 'proposal_']
-            prefixes = ['last_']
-            prefixes.append('proposal_')
-        else:
-            prefixes = ['proposal_']  # only proposal
-        prefixes += [f'{i}head_' for i in range(args.num_decoder_layers - 1)]
+        # if args.num_decoder_layers > 0:
+        #     prefixes = ['last_', 'proposal_']
+        #     prefixes = ['last_']
+        #     prefixes.append('proposal_')
+        # else:
+        #     prefixes = ['proposal_']  # only proposal
+        # prefixes += [f'{i}head_' for i in range(args.num_decoder_layers - 1)]
+        prefixes = ['last_']
 
         if args.butd_cls or args.butd_gt:
             evaluator = GroundingGTEvaluator(prefixes=prefixes)
@@ -163,9 +166,10 @@ class TrainTester(BaseTrainTester):
                     pred_res[prefix] += pred_sample
                     gt_res[prefix] += gt_sample
         
-        for prefix in prefixes:
-            self.logger.info('Eval ' + str(prefix) + ' results:' + '\n')
-            ground_eval(gt_res[prefix], pred_res[prefix], self.logger)
+        if dist.get_rank() == 0:
+            for prefix in prefixes:
+                self.logger.info('Eval ' + str(prefix) + ' results:' + '\n')
+                ground_eval(gt_res[prefix], pred_res[prefix], self.logger)
         
         # if dist.get_rank() == 0:
         #     if evaluator is not None:
@@ -297,11 +301,11 @@ class TrainTester(BaseTrainTester):
 if __name__ == '__main__':
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     opt = parse_option()
-    # torch.cuda.set_device(opt.local_rank)
-    # torch.distributed.init_process_group(backend='nccl', init_method='env://')
-    # torch.backends.cudnn.enabled = True
-    # torch.backends.cudnn.benchmark = True
-    # torch.backends.cudnn.deterministic = True
+    torch.cuda.set_device(opt.local_rank)
+    torch.distributed.init_process_group(backend='nccl', init_method='env://')
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = True
 
     train_tester = TrainTester(opt)
     ckpt_path = train_tester.main(opt)

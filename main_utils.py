@@ -21,7 +21,7 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-# import torch.distributed as dist
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from models import HungarianMatcher, SetCriterion, compute_hungarian_loss
@@ -53,6 +53,8 @@ def parse_option():
 
     # Data
     parser.add_argument('--batch_size', type=int, default=8,
+                        help='Batch Size during training')
+    parser.add_argument('--test_batch_size', type=int, default=8,
                         help='Batch Size during training')
     parser.add_argument('--dataset', type=str, default=['sr3d'],
                         nargs='+', help='list of datasets to train on')
@@ -96,6 +98,7 @@ def parse_option():
     parser.add_argument('--log_dir', default='log',
                         help='Dump dir to save model checkpoint')
     parser.add_argument('--print_freq', type=int, default=10)  # batch-wise
+    parser.add_argument('--eval_print_freq', type=int, default=10)  # batch-wise
     parser.add_argument('--save_freq', type=int, default=10)  # epoch-wise
     parser.add_argument('--val_freq', type=int, default=5)  # epoch-wise
 
@@ -176,11 +179,11 @@ class BaseTrainTester:
 
         # Create logger
         self.logger = setup_logger(
-            output=args.log_dir,
+            output=args.log_dir, distributed_rank=dist.get_rank(),
             name=name
         )
         # Save config file and initialize tb writer
-        if True: #if dist.get_rank() == 0:
+        if dist.get_rank() == 0:
             path = os.path.join(args.log_dir, "config.json")
             with open(path, 'w') as f:
                 json.dump(vars(args), f, indent=2)
@@ -206,7 +209,7 @@ class BaseTrainTester:
         # Samplers and loaders
         g = torch.Generator()
         g.manual_seed(0)
-        # train_sampler = DistributedSampler(train_dataset)
+        train_sampler = DistributedSampler(train_dataset, rank=args.local_rank)
         train_loader = DataLoader(
             train_dataset,
             batch_size=args.batch_size,
@@ -214,19 +217,19 @@ class BaseTrainTester:
             num_workers=args.num_workers,
             worker_init_fn=seed_worker,
             pin_memory=True,
-            # sampler=train_sampler,
+            sampler=train_sampler,
             drop_last=True,
             generator=g
         )
-        # test_sampler = DistributedSampler(test_dataset, shuffle=False)
+        test_sampler = DistributedSampler(test_dataset, shuffle=False)
         test_loader = DataLoader(
             test_dataset,
-            batch_size=args.batch_size,
+            batch_size=args.test_batch_size,
             shuffle=False,
             num_workers=args.num_workers,
             worker_init_fn=seed_worker,
             pin_memory=True,
-            # sampler=test_sampler,
+            sampler=test_sampler,
             drop_last=False,
             generator=g
         )
@@ -303,14 +306,15 @@ class BaseTrainTester:
 
         # Get scheduler
         scheduler = get_scheduler(optimizer, len(train_loader), args)
+        
 
         # Move model to devices
         if torch.cuda.is_available():
             model = model.cuda()
-        # model = DistributedDataParallel(
-        #     model, device_ids=[args.local_rank],
-        #     broadcast_buffers=False  # , find_unused_parameters=True
-        # )
+        model = DistributedDataParallel(
+            model, device_ids=[args.local_rank],
+            broadcast_buffers=False  # , find_unused_parameters=True
+        )
 
         # Check for a checkpoint
         if args.checkpoint_path:
@@ -328,7 +332,7 @@ class BaseTrainTester:
 
         # Training loop
         for epoch in range(args.start_epoch, args.max_epoch + 1):
-            # train_loader.sampler.set_epoch(epoch)
+            train_loader.sampler.set_epoch(epoch)
             tic = time.time()
             self.train_one_epoch(
                 epoch, train_loader, model,
@@ -344,22 +348,23 @@ class BaseTrainTester:
                 )
             )
             if epoch % args.val_freq == 0:
-                if True: # if dist.get_rank() == 0:  # save model
+                if dist.get_rank() == 0:  # save model
+                    print('Saving')
                     save_checkpoint(args, epoch, model, optimizer, scheduler)
-                print("Test evaluation.......")
-                self.evaluate_one_epoch(
-                    epoch, test_loader,
-                    model, criterion, set_criterion, args
-                )
+                # print("Test evaluation.......")
+                # self.evaluate_one_epoch(
+                #     epoch, test_loader,
+                #     model, criterion, set_criterion, args
+                # )
 
         # Training is over, evaluate
         save_checkpoint(args, 'last', model, optimizer, scheduler, True)
         saved_path = os.path.join(args.log_dir, 'ckpt_epoch_last.pth')
         self.logger.info("Saved in {}".format(saved_path))
-        self.evaluate_one_epoch(
-            args.max_epoch, test_loader,
-            model, criterion, set_criterion, args
-        )
+        # self.evaluate_one_epoch(
+        #     args.max_epoch, test_loader,
+        #     model, criterion, set_criterion, args
+        # )
         return saved_path
 
     @staticmethod
@@ -413,6 +418,9 @@ class BaseTrainTester:
 
         # Loop over batches
         for batch_idx, batch_data in enumerate(train_loader):
+            # with open('debug.txt','a') as f:
+            #     print(batch_data, file=f)
+            #     print('========================', file=f)
             # Move to GPU
             batch_data = self._to_gpu(batch_data)
             # es_mod
@@ -469,22 +477,23 @@ class BaseTrainTester:
             scheduler.step()
 
             # Accumulate statistics and print out
-            stat_dict = self._accumulate_stats(stat_dict, end_points)
+            if dist.get_rank() == 0:
+                stat_dict = self._accumulate_stats(stat_dict, end_points)
 
-            if (batch_idx + 1) % args.print_freq == 0:
-                # Terminal logs
-                self.logger.info(
-                    f'Train: [{epoch}][{batch_idx + 1}/{len(train_loader)}]  '
-                )
-                self.logger.info(''.join([
-                    f'{key} {stat_dict[key] / args.print_freq:.4f} \t'
-                    for key in sorted(stat_dict.keys())
-                    if 'loss' in key and 'proposal_' not in key
-                    and 'last_' not in key and 'head_' not in key
-                ]))
+                if (batch_idx + 1) % args.print_freq == 0:
+                    # Terminal logs
+                    self.logger.info(
+                        f'Train: [{epoch}][{batch_idx + 1}/{len(train_loader)}]  '
+                    )
+                    self.logger.info(''.join([
+                        f'{key} {stat_dict[key] / args.print_freq:.4f} \t'
+                        for key in sorted(stat_dict.keys())
+                        if 'loss' in key and 'proposal_' not in key
+                        and 'last_' not in key and 'head_' not in key
+                    ]))
 
-                for key in sorted(stat_dict.keys()):
-                    stat_dict[key] = 0
+                    for key in sorted(stat_dict.keys()):
+                        stat_dict[key] = 0
 
     @torch.no_grad()
     def _main_eval_branch(self, batch_idx, batch_data, test_loader, model,
@@ -514,7 +523,7 @@ class BaseTrainTester:
 
         # Accumulate statistics and print out
         stat_dict = self._accumulate_stats(stat_dict, end_points)
-        if (batch_idx + 1) % args.print_freq == 0:
+        if (batch_idx + 1) % args.eval_print_freq == 0:
             self.logger.info(f'Eval: [{batch_idx + 1}/{len(test_loader)}]  ')
             self.logger.info(''.join([
                 f'{key} {stat_dict[key] / (float(batch_idx + 1)):.4f} \t'

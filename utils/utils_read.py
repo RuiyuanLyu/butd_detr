@@ -417,6 +417,8 @@ def read_es_info(path, show_progress=True, count_type_from_zero=False):
     data = np.load(path, allow_pickle=True)
     data_list = data["data_list"]
     object_type_to_int = data["metainfo"]["categories"]
+    if count_type_from_zero:
+        type2int = {k:v-1 for k, v in object_type_to_int.items()}
     object_int_to_type = {v: k for k, v in object_type_to_int.items()}
     output_data = {}
     pbar = tqdm(data_list) if show_progress else data_list
@@ -449,16 +451,16 @@ def read_es_info(path, show_progress=True, count_type_from_zero=False):
             "object_types": object_types,
             "object_type_ints": object_types_int,
         }
-    return output_data
+    return output_data, type2int
 
 def read_es_infos(paths, show_progress=True, count_type_from_zero=False):
     output_data = {}
     if isinstance(paths, str):
         paths = [paths]
     for path in paths:
-        data = read_es_info(path, show_progress, count_type_from_zero)
+        data, type2int = read_es_info(path, show_progress, count_type_from_zero)
         output_data.update(data)
-    return output_data
+    return output_data, type2int
 
 if __name__ == "__main__":
     # pickle_file = "D:\Projects\shared_data\embodiedscan_infos\competition_ver\embodiedscan_infos_val.pkl"

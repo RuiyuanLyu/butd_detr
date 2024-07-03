@@ -13,8 +13,6 @@ from scipy.optimize import linear_sum_assignment
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pytorch3d.transforms import euler_angles_to_matrix
-from utils.euler_util import bbox_to_corners, euler_iou3d, chamfer_distance
 import torch.distributed as dist
 
 
@@ -283,13 +281,11 @@ class HungarianMatcher(nn.Module):
         # We flatten to compute the cost matrices in a batch
         out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [B*Q, C]
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [B*Q, 6]
-        out_rot = outputs["pred_rotmat"].flatten(0, 1)  # [B*Q, 3, 3]
 
         # Also concat the target labels and boxes
         positive_map = torch.cat([t["positive_map"] for t in targets])
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
-        tgt_rot = torch.cat([v["rotmat"] for v in targets])
 
         if self.soft_token:
             # pad if necessary
@@ -307,13 +303,6 @@ class HungarianMatcher(nn.Module):
 
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
-        # out_corners = bbox_to_corners(out_bbox[:, :3], out_bbox[:, 3:], out_rot)
-        # tgt_corners = bbox_to_corners(tgt_bbox[:, :3], tgt_bbox[:, 3:].clamp(min=2e-2), tgt_rot)
-        # # with open('debug1.pkl','wb') as f:
-        # #     import pickle
-        # #     pickle.dump({'out_bbox': out_bbox.detach().cpu(), 'tgt_bbox': tgt_bbox.detach().cpu(), 'out_rot':out_rot.detach().cpu(), 'tgt_rot': tgt_rot.detach().cpu(), 'out_cor': out_corners.detach().cpu(), 'tgt_cor': tgt_corners.detach().cpu()}, f)
-        # iou3d = euler_iou3d(out_corners, tgt_corners)
-        # cost_giou = -iou3d
 
         # Compute the giou cost betwen boxes
         cost_giou = -generalized_box_iou3d(
@@ -405,12 +394,8 @@ class SetCriterion(nn.Module):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
-        src_rot_mat = outputs['pred_rotmat'][idx]
         target_boxes = torch.cat([
             t['boxes'][i] for t, (_, i) in zip(targets, indices)
-        ], dim=0)
-        target_rot_mat = torch.cat([
-            t['rotmat'][i] for t, (_, i) in zip(targets, indices)
         ], dim=0)
 
         loss_bbox = (
@@ -425,18 +410,11 @@ class SetCriterion(nn.Module):
         )
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
-        
-        # import pdb
-        # pdb.set_trace()
-        src_corners = bbox_to_corners(src_boxes[:, :3], src_boxes[:, 3:], src_rot_mat)
-        tgt_corners = bbox_to_corners(target_boxes[:, :3], target_boxes[:, 3:], target_rot_mat)
-        bbox_cd_loss, _, _, _ = chamfer_distance(src_corners, tgt_corners, 1.0, 0.0, 'l1', 'mean')
-        losses['loss_bboxcd'] = bbox_cd_loss
 
-        # loss_giou = 1 - torch.diag(generalized_box_iou3d(   # TODO yesname
-        #     box_cxcyczwhd_to_xyzxyz(src_boxes), 
-        #     box_cxcyczwhd_to_xyzxyz(target_boxes)))
-        # losses['loss_giou'] = loss_giou.sum() / num_boxes
+        loss_giou = 1 - torch.diag(generalized_box_iou3d(
+            box_cxcyczwhd_to_xyzxyz(src_boxes),
+            box_cxcyczwhd_to_xyzxyz(target_boxes)))
+        losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
     def loss_contrastive_align(self, outputs, targets, indices, num_boxes):
@@ -553,8 +531,7 @@ class SetCriterion(nn.Module):
         )
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
-        num_boxes = torch.clamp(num_boxes / dist.get_world_size(), min=1)
-        num_boxes = torch.clamp(num_boxes, min=1.0).item()
+        num_boxes = torch.clamp(num_boxes / dist.get_world_size(), min=1).item()
 
         # Compute all the requested losses
         losses = {}
@@ -577,14 +554,12 @@ def compute_hungarian_loss(end_points, num_decoder_layers, set_criterion,
     gt_size = end_points['size_gts']  # (B,G,3)
     gt_labels = end_points['sem_cls_label']  # (B, G)
     gt_bbox = torch.cat([gt_center, gt_size], dim=-1)  # cxcyczwhd
-    gt_rotmat = euler_angles_to_matrix(end_points['euler_gts'], 'ZXY')
     positive_map = end_points['positive_map']
     box_label_mask = end_points['box_label_mask']
     target = [
         {
             "labels": gt_labels[b, box_label_mask[b].bool()],
-            "boxes": gt_bbox[b, box_label_mask[b].bool()][..., :6],
-            "rotmat": gt_rotmat[b, box_label_mask[b].bool()],
+            "boxes": gt_bbox[b, box_label_mask[b].bool()],
             "positive_map": positive_map[b, box_label_mask[b].bool()]
         }
         for b in range(gt_labels.shape[0])
@@ -605,7 +580,6 @@ def compute_hungarian_loss(end_points, num_decoder_layers, set_criterion,
         pred_logits = end_points[f'{prefix}sem_cls_scores']  # (B, Q, n_class)
         output['pred_logits'] = pred_logits
         output["pred_boxes"] = pred_bbox
-        output["pred_rotmat"] = end_points[f'{prefix}rot_mat']
 
         # Compute all the requested losses
         losses, _ = set_criterion(output, target)
@@ -613,7 +587,7 @@ def compute_hungarian_loss(end_points, num_decoder_layers, set_criterion,
             end_points[f'{prefix}_{loss_key}'] = losses[loss_key]
         loss_ce += losses.get('loss_ce', 0)
         loss_bbox += losses['loss_bbox']
-        loss_giou += losses.get('loss_bboxcd', 0)
+        loss_giou += losses.get('loss_giou', 0)
         if 'proj_tokens' in end_points:
             loss_contrastive_align += losses['loss_contrastive_align']
 

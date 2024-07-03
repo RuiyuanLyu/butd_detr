@@ -3,7 +3,7 @@ from pytorch3d.ops import box3d_overlap
 from torch.nn.functional import l1_loss, mse_loss, smooth_l1_loss
 from typing import Union, Tuple
 import time
-
+from pytorch3d.transforms import euler_angles_to_matrix, matrix_to_euler_angles
 
 def bbox_to_corners(centers, sizes, rot_mat: torch.Tensor) -> torch.Tensor:
     """Transform bbox parameters to the 8 corners.
@@ -54,7 +54,6 @@ def euler_iou3d(boxes1, boxes2):
     if rows * cols == 0:
         return boxes1.tensor.new(rows, cols)
     
-    time.sleep(0.01)
     _, iou3d = box3d_overlap(boxes1, boxes2)
     return iou3d
 
@@ -141,3 +140,14 @@ def chamfer_distance(
         raise NotImplementedError
 
     return loss_src, loss_dst, indices1, indices2
+
+def euler_to_matrix_np(euler):
+    # euler: N*3 np array
+    euler_tensor = torch.tensor(euler)
+    matrix_tensor = euler_angles_to_matrix(euler_tensor, 'ZXY')
+    return matrix_tensor.numpy()
+
+def matrix_to_euler_np(matrix):
+    matrix_tensor = torch.tensor(matrix)
+    euler_tensor = matrix_to_euler_angles(matrix_tensor, 'ZXY')
+    return euler_tensor.numpy()

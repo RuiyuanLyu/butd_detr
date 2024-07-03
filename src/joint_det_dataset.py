@@ -8,6 +8,7 @@
 
 import csv
 from collections import defaultdict
+from tabnanny import check
 import h5py
 import json
 import multiprocessing as mp
@@ -25,6 +26,7 @@ from data.model_util_scannet import ScannetDatasetConfig
 from data.scannet_utils import read_label_mapping
 from src.visual_data_handlers import Scan
 from .scannet_classes import REL_ALIASES, VIEW_DEP_RELS
+from utils.euler_util import euler_to_matrix_np, matrix_to_euler_np
 
 
 NUM_CLASSES = 288
@@ -54,7 +56,7 @@ class Joint3DDataset(Dataset):
         self.use_height = use_height
         self.overfit = overfit
         self.detect_intermediate = detect_intermediate
-        self.augment = False # self.split == 'train'     # HACK yesname
+        self.augment = False # self.split == 'train'
         self.use_multiview = use_multiview
         self.data_path = data_path
         self.visualize = False  # manually set this to True to debug
@@ -63,9 +65,16 @@ class Joint3DDataset(Dataset):
         self.butd_cls = butd_cls
         self.es_info_file = es_info_file
         self.box_dim = 9
+        self.len1 = False
+        
+        if split == 'val_to_train':
+            self.split = 'val'
+            self.augment = False
+            split = 'val'
+            self.len1 = True
 
         if self.es_info_file:
-            self.es_info = read_es_infos(self.es_info_file, count_type_from_zero=True)
+            self.es_info, self.type2int = read_es_infos(self.es_info_file, count_type_from_zero=True)
             self.es_info = apply_mapping_to_keys(self.es_info, NUM2RAW_3RSCAN)
         else:  # empty dict if no es_info_file
             self.es_info = {}
@@ -159,7 +168,17 @@ class Joint3DDataset(Dataset):
             obj_ids = list(self.es_info[scan_id]["object_ids"])
             target_id = anno['target_id']
             anchor_ids = anno['anchor_ids']
-            target_index = [obj_ids.index(tar_id) for tar_id in target_id]
+            targets = []
+            target_index = []
+            for idx, tar_id in enumerate(target_id):
+                if tar_id in obj_ids:
+                    tgt_id = obj_ids.index(tar_id)
+                    if tgt_id >= MAX_NUM_OBJ:
+                        continue
+                    targets.append(anno['target'][idx])
+                    target_index.append(tgt_id)
+            if len(target_index) <= 0:
+                continue
             if isinstance(anchor_ids, int):
                 anchor_ids = [anchor_ids]
             try:
@@ -167,15 +186,16 @@ class Joint3DDataset(Dataset):
             except ValueError: # some anchor ids is broken
                 print(f"drop due to anchor id fail indexing {anchor_ids}")
                 continue 
-            # if target_index >= MAX_NUM_OBJ or (np.array(anchor_indices)>=MAX_NUM_OBJ).any():
-            #     # print(f"drop due to too many objects")
-            #     continue
+            if (np.array(anchor_indices)>=MAX_NUM_OBJ).any():
+                # print(f"drop due to too many objects")
+                continue
             out_dict = {
+                'raw_scan_id': anno['scan_id'],
                 'scan_id': scan_id,
                 'target_id': target_index,
                 'distractor_ids': anno['distractor_ids'],
                 'utterance': anno['text'],
-                'target': anno['target'],
+                'target': targets,
                 'anchors': anno['anchors'],
                 'anchor_ids': anchor_indices,
                 'dataset': "es",
@@ -183,7 +203,13 @@ class Joint3DDataset(Dataset):
                 'span_utterance': anno['text'], # es mod: 
                 'sub_class' :  anno.get("sub_class", "other")
             }
-            annos.append(out_dict)
+            check_token_posi = self._get_token_positive_map(out_dict, is_pre=True)
+            if check_token_posi:
+                annos.append(out_dict)
+            else:
+                continue
+        print('==========================================')
+        print(len(annos), '/', len(es_vg))
         return annos
 
     def load_sr3dplus_annos(self):
@@ -419,51 +445,46 @@ class Joint3DDataset(Dataset):
         return self.multiview_data[pid][scan_id]
 
     def _augment(self, pc, color, rotate):
-        raise NotImplementedError()
         augmentations = {}
-
         # Rotate/flip only if we don't have a view_dep sentence
-        if rotate:
-            theta_z = 90 * np.random.randint(0, 4) + 10 * np.random.rand() - 5
-            # Flipping along the YZ plane
-            augmentations['yz_flip'] = np.random.random() > 0.5
-            if augmentations['yz_flip']:
-                pc[:, 0] = -pc[:, 0]
-            # Flipping along the XZ plane
-            augmentations['xz_flip'] = np.random.random() > 0.5
-            if augmentations['xz_flip']:
-                pc[:, 1] = -pc[:, 1]
-        else:
-            theta_z = (2 * np.random.rand() - 1) * 5
+        
+        theta_z = np.random.uniform(-0.087266, 0.087266)
+        # Flipping along the YZ plane
+        augmentations['yz_flip'] = np.random.random() > 0.5
+        if augmentations['yz_flip']:
+            pc[:, 0] = -pc[:, 0]
+        # Flipping along the XZ plane
+        augmentations['xz_flip'] = np.random.random() > 0.5
+        if augmentations['xz_flip']:
+            pc[:, 1] = -pc[:, 1]
+        
         augmentations['theta_z'] = theta_z
         pc[:, :3] = rot_z(pc[:, :3], theta_z)
         # Rotate around x
-        theta_x = (2 * np.random.rand() - 1) * 2.5
+        theta_x = 0
         augmentations['theta_x'] = theta_x
-        pc[:, :3] = rot_x(pc[:, :3], theta_x)
         # Rotate around y
-        theta_y = (2 * np.random.rand() - 1) * 2.5
+        theta_y = 0
         augmentations['theta_y'] = theta_y
-        pc[:, :3] = rot_y(pc[:, :3], theta_y)
 
-        # Add noise
-        noise = np.random.rand(len(pc), 3) * 5e-3
-        augmentations['noise'] = noise
-        pc[:, :3] = pc[:, :3] + noise
-
-        # Translate/shift
-        augmentations['shift'] = np.random.random((3,))[None, :] - 0.5
-        pc[:, :3] += augmentations['shift']
+        # # Add noise
+        # noise = np.random.rand(len(pc), 3) * 5e-3
+        # augmentations['noise'] = noise
+        # pc[:, :3] = pc[:, :3] + noise
 
         # Scale
-        augmentations['scale'] = 0.98 + 0.04 * np.random.random()
+        augmentations['scale'] = np.random.uniform(0.9, 1.1)
         pc[:, :3] *= augmentations['scale']
+        
+        # Translate/shift
+        augmentations['shift'] = np.random.normal(scale=np.array([.1, .1, .1], dtype=np.float32), size=3).T
+        pc[:, :3] += augmentations['shift']
 
         # Color
-        if color is not None:
-            color += self.mean_rgb
-            color *= 0.98 + 0.04 * np.random.random((len(color), 3))
-            color -= self.mean_rgb
+        # if color is not None:
+        #     color += self.mean_rgb
+        #     color *= 0.98 + 0.04 * np.random.random((len(color), 3))
+        #     color -= self.mean_rgb
         return pc, color, augmentations
 
     def _get_pc(self, anno, scan):
@@ -587,7 +608,7 @@ class Joint3DDataset(Dataset):
 
         return point_cloud, augmentations, color
     
-    def _get_token_positive_map(self, anno):
+    def _get_token_positive_map(self, anno, is_pre=False):
         """Return correspondence of boxes to tokens."""
         # Token start-end span in characters
         caption = ' '.join(anno['utterance'].replace(',', ' ,').split())
@@ -599,18 +620,23 @@ class Joint3DDataset(Dataset):
             cat_names = [anno['target']]
         if self.detect_intermediate:
             cat_names += anno['anchors']
+        if len(cat_names) > MAX_NUM_OBJ:
+            if is_pre:
+                return False
+            else:
+                raise NotImplementedError
         for c, cat_name in enumerate(cat_names):
             if anno["dataset"] == "es":
                 try:
                     bgn_idx = anno['pred_pos_map'][c][0]
                     end_idx = anno['pred_pos_map'][c][1]
                     cat_name = anno['utterance'][bgn_idx:end_idx]
-                    cat_name = cat_name.strip()
+                    cat_name = ' '.join(cat_name.replace(',', ' ,').split())
                 except Exception as e:
                     pass
                     # print(anno['pred_pos_map'])
                     # print(anno['utterance'])
-            cat_name = cat_name.split(" ")[0] # TODO: fix this hack
+            # cat_name = cat_name.split(" ")[0] # TODO: fix this hack
             start_span = caption.find(' ' + cat_name + ' ')
             len_ = len(cat_name)
             if start_span < 0:
@@ -625,11 +651,21 @@ class Joint3DDataset(Dataset):
                 while caption[len_ + start_span] != ' ':
                     len_ += 1
             end_span = start_span + len_
-            assert start_span > -1, (caption, cat_name)
-            assert end_span > 0, (caption, cat_name)
+            if is_pre:
+                try:
+                    assert start_span > -1, (caption, cat_name, anno)
+                    assert end_span > 0, (caption, cat_name, anno)
+                except:
+                    print(caption, cat_name, anno)
+                    return False
+            
+            assert start_span > -1, (caption, cat_name, anno)
+            assert end_span > 0, (caption, cat_name, anno)
             tokens_positive[c][0] = start_span
             tokens_positive[c][1] = end_span
 
+        if is_pre:
+            return True
         # Positive map (for soft token prediction)
         tokenized = self.tokenizer.batch_encode_plus(
             [' '.join(anno['utterance'].replace(',', ' ,').split())],
@@ -640,7 +676,39 @@ class Joint3DDataset(Dataset):
         positive_map[:len(cat_names)] = gt_map
         return tokens_positive, positive_map
 
-    def _get_target_boxes_es(self, anno, scan_id):
+    def _aug_gt(self, target_bboxes, augmentations):
+        if augmentations is None:
+            return target_bboxes
+        if 'yz_flip' in augmentations:
+            if augmentations['yz_flip']:
+                target_bboxes[:,0] = -1 * target_bboxes[:,0]
+                target_bboxes[:,6] = -target_bboxes[:,6] + np.pi
+                target_bboxes[:,8] = -target_bboxes[:,8]
+        
+        if 'xz_flip' in augmentations:
+            if augmentations['xz_flip']:
+                target_bboxes[:,1] = -1 * target_bboxes[:,1]
+                target_bboxes[:,6] = -target_bboxes[:,6]
+                target_bboxes[:,7] = -target_bboxes[:,1] + np.pi
+        
+        if 'theta_z' in augmentations:
+            target_bboxes_rot_mat = euler_to_matrix_np(target_bboxes[:, 6:9])
+            rot_mat = rot_z_mat(augmentations['theta_z'])
+            target_bboxes[:, 0:3] = np.dot(target_bboxes[:, 0:3], np.transpose(rot_mat))
+            target_bboxes_rot_mat = np.matmul(target_bboxes_rot_mat, np.transpose(rot_mat))
+            target_bboxes[:, 6:9] = matrix_to_euler_np(target_bboxes_rot_mat)
+        
+        if 'scale' in augmentations:
+            scale_factor = augmentations['scale']
+            target_bboxes[:, 0:6] *= scale_factor
+        
+        if 'shift' in augmentations:
+            trans_factor = augmentations['shift']
+            target_bboxes[:, 0:3] += trans_factor
+        
+        return target_bboxes
+
+    def _get_target_boxes_es(self, anno, scan_id, augmentations):
         """
             return bboxes, box_label_mask, point_instance_label
         """
@@ -660,13 +728,79 @@ class Joint3DDataset(Dataset):
         bboxes[:len(tindices)] = np.stack([
             self.es_info[scan_id]['bboxes'][tindex][:self.box_dim] for tindex in tindices
         ])
-        if self.split == 'train' and self.augment:  # jitter boxes
-            bboxes[:len(tindices)] *= 0.95 + 0.1 * np.random.random((len(tindices), self.box_dim))
+        
+        bboxes[:len(tindices)] = self._aug_gt(bboxes[:len(tindices)], augmentations)
+        # if self.split == 'train' and self.augment:  # jitter boxes
+        #     bboxes[:len(tindices)] *= 0.95 + 0.1 * np.random.random((len(tindices), self.box_dim))
         bboxes[len(tindices):, :3] = 1000
         box_label_mask = np.zeros(MAX_NUM_OBJ)
         box_label_mask[:len(tindices)] = 1
         return bboxes, box_label_mask, point_instance_label
 
+
+    def _get_detected_objects(self, split, scan_id, augmentations):
+        # Initialize
+        all_detected_bboxes = np.zeros((MAX_NUM_OBJ, 9))
+        all_detected_bbox_label_mask = np.array([False] * MAX_NUM_OBJ)
+        detected_class_ids = np.zeros((MAX_NUM_OBJ,))
+        detected_logits = np.zeros((MAX_NUM_OBJ, NUM_CLASSES))
+        
+        detected_dict = np.load(os.path.join('/mnt/hwfile/OpenRobotLab/lvruiyuan/pcd_data/embodiedscan_pred_boxes', f'{scan_id}.npy.npz'))
+
+        # Load
+        # detected_dict = np.load(
+        #     f'{self.data_path}group_free_pred_bboxes_{split}/{scan_id}.npy',
+        #     allow_pickle=True
+        # )
+
+        all_bboxes_ = np.array(detected_dict['boxes']).reshape(-1, 9)
+        all_bboxes_[:, 3:6] = np.clip(all_bboxes_[:, 3:6], a_min=1e-2, a_max=None)
+        scores = detected_dict['scores']
+        classes_284 = detected_dict['labels']
+        
+        # import pdb
+        # pdb.set_trace()
+        
+        top_idx = np.argsort(-scores)[:MAX_NUM_OBJ-1]
+        
+        all_bboxes_ = all_bboxes_[top_idx]
+        scores = scores[top_idx]
+        classes_284 = classes_284[top_idx]
+        num_objs = classes_284.shape[0]
+        classes = [class_284_names[classes_284[i]] for i in range(num_objs)]
+        assert len(classes) == num_objs, f"{top_idx.shape[0]}"
+        
+        cid = np.array([self.type2int[c] for c in classes])
+
+        assert len(classes) < MAX_NUM_OBJ
+        assert len(classes) == all_bboxes_.shape[0]
+
+        num_objs = len(classes)
+        all_detected_bboxes[:num_objs] = all_bboxes_
+        all_detected_bbox_label_mask[:num_objs] = np.array([True] * num_objs)
+        detected_class_ids[:num_objs] = cid
+        # detected_logits[:num_objs] = detected_dict['logits']
+        # Match current augmentations
+        if self.augment and self.split == 'train':
+            all_detected_bboxes[:num_objs] = self._aug_gt(all_detected_bboxes[:num_objs], augmentations)
+        if self.augment_det and self.split == 'train':
+            min_ = all_detected_bboxes.min(0)
+            max_ = all_detected_bboxes.max(0)
+            rand_box = (
+                (max_ - min_)[None]
+                * np.random.random(all_detected_bboxes.shape)
+                + min_
+            )
+            rand_box[:, 6:9] = 0
+            corrupt = np.random.random(len(all_detected_bboxes)) > 0.7
+            all_detected_bboxes[corrupt] = rand_box[corrupt]
+            detected_class_ids[corrupt] = np.random.randint(
+                0, NUM_CLASSES, (len(detected_class_ids))
+            )[corrupt]
+        return (
+            all_detected_bboxes, all_detected_bbox_label_mask,
+            detected_class_ids
+        )
 
     def _get_scene_objects_es(self, scan_id):
         all_bboxes = np.zeros((MAX_NUM_OBJ, self.box_dim))
@@ -744,7 +878,7 @@ class Joint3DDataset(Dataset):
 
         # "Target" boxes: append anchors if they're to be detected
         gt_bboxes, box_label_mask, point_instance_label = \
-            self._get_target_boxes_es(anno, scan_id)
+            self._get_target_boxes_es(anno, scan_id, augmentations)
 
         sample_idxs = np.random.choice(
             len(point_cloud),
@@ -767,9 +901,10 @@ class Joint3DDataset(Dataset):
         # if anno['dataset'] == 'es':
         class_ids, all_bboxes, all_bbox_label_mask = self._get_scene_objects_es(anno['scan_id'])
         # else:
-        #     (
-        #         class_ids, all_bboxes, all_bbox_label_mask
-        #     ) = self._get_scene_objects(scan)
+        (
+            all_detected_bboxes, all_detected_bbox_label_mask,
+            detected_class_ids
+        ) = self._get_detected_objects(split, anno['raw_scan_id'], augmentations)
 
         # Detected boxes
         # (
@@ -851,9 +986,9 @@ class Joint3DDataset(Dataset):
                     anno['anchor_ids']
                     + [-1] * (32 - len(anno['anchor_ids']))
                 ).astype(int),
-                # "all_detected_boxes": all_detected_bboxes.astype(np.float32),
-                # "all_detected_bbox_label_mask": all_detected_bbox_label_mask.astype(np.bool8),
-                # "all_detected_class_ids": detected_class_ids.astype(np.int64),
+                "all_detected_boxes": all_detected_bboxes.astype(np.float32),
+                "all_detected_bbox_label_mask": all_detected_bbox_label_mask.astype(np.bool8),
+                "all_detected_class_ids": detected_class_ids.astype(np.int64),
                 # "all_detected_logits": detected_logits.astype(np.float32),
                 "is_view_dep": self._is_view_dep(anno['utterance']),
                 "is_hard": len(anno['distractor_ids']) > 1,
@@ -975,6 +1110,8 @@ class Joint3DDataset(Dataset):
 
     def __len__(self):
         """Return number of utterances."""
+        if self.len1:
+            return 1
         return len(self.annos)
 
 
@@ -1047,6 +1184,13 @@ def rot_z(pc, theta):
         pc.T
     ).T
 
+def rot_z_mat(theta):
+    theta = theta * np.pi / 180
+    return np.array([
+            [np.cos(theta), -np.sin(theta), 0],
+            [np.sin(theta), np.cos(theta), 0],
+            [0, 0, 1.0]
+        ])
 
 def box2points(box):
     """Convert box center/hwd coordinates to vertices (8x3)."""
@@ -1134,3 +1278,47 @@ def unpickle_data(file_name, python2_to_3=False):
         else:
             yield cPickle.load(in_file)
     in_file.close()
+
+class_284_names = (
+    'adhesive tape', 'air conditioner', 'alarm', 'album', 'arch', 'backpack',
+    'bag', 'balcony', 'ball', 'banister', 'bar', 'barricade', 'baseboard',
+    'basin', 'basket', 'bathtub', 'beam', 'beanbag', 'bed', 'bench', 'bicycle',
+    'bidet', 'bin', 'blackboard', 'blanket', 'blinds', 'board', 'body loofah',
+    'book', 'boots', 'bottle', 'bowl', 'box', 'bread', 'broom', 'brush',
+    'bucket', 'cabinet', 'calendar', 'camera', 'can', 'candle', 'candlestick',
+    'cap', 'car', 'carpet', 'cart', 'case', 'chair', 'chandelier', 'cleanser',
+    'clock', 'clothes', 'clothes dryer', 'coat hanger', 'coffee maker', 'coil',
+    'column', 'commode', 'computer', 'conducting wire', 'container', 'control',
+    'copier', 'cosmetics', 'couch', 'counter', 'countertop', 'crate', 'crib',
+    'cube', 'cup', 'curtain', 'cushion', 'decoration', 'desk', 'detergent',
+    'device', 'dish rack', 'dishwasher', 'dispenser', 'divider', 'door',
+    'door knob', 'doorframe', 'doorway', 'drawer', 'dress', 'dresser', 'drum',
+    'duct', 'dumbbell', 'dustpan', 'dvd', 'eraser', 'excercise equipment',
+    'fan', 'faucet', 'fence', 'file', 'fire extinguisher', 'fireplace',
+    'flowerpot', 'flush', 'folder', 'food', 'footstool', 'frame', 'fruit',
+    'furniture', 'garage door', 'garbage', 'glass', 'globe', 'glove',
+    'grab bar', 'grass', 'guitar', 'hair dryer', 'hamper', 'handle', 'hanger',
+    'hat', 'headboard', 'headphones', 'heater', 'helmets', 'holder', 'hook',
+    'humidifier', 'ironware', 'jacket', 'jalousie', 'jar', 'kettle',
+    'keyboard', 'kitchen island', 'kitchenware', 'knife', 'label', 'ladder',
+    'lamp', 'laptop', 'ledge', 'letter', 'light', 'luggage', 'machine',
+    'magazine', 'mailbox', 'map', 'mask', 'mat', 'mattress', 'menu',
+    'microwave', 'mirror', 'molding', 'monitor', 'mop', 'mouse', 'napkins',
+    'notebook', 'ottoman', 'oven', 'pack', 'package', 'pad', 'pan', 'panel',
+    'paper', 'paper cutter', 'partition', 'pedestal', 'pen', 'person', 'piano',
+    'picture', 'pillar', 'pillow', 'pipe', 'pitcher', 'plant', 'plate',
+    'player', 'plug', 'plunger', 'pool', 'pool table', 'poster', 'pot',
+    'price tag', 'printer', 'projector', 'purse', 'rack', 'radiator', 'radio',
+    'rail', 'range hood', 'refrigerator', 'remote control', 'ridge', 'rod',
+    'roll', 'roof', 'rope', 'sack', 'salt', 'scale', 'scissors', 'screen',
+    'seasoning', 'shampoo', 'sheet', 'shelf', 'shirt', 'shoe', 'shovel',
+    'shower', 'sign', 'sink', 'soap', 'soap dish', 'soap dispenser', 'socket',
+    'speaker', 'sponge', 'spoon', 'stairs', 'stall', 'stand', 'stapler',
+    'statue', 'steps', 'stick', 'stool', 'stopcock', 'stove', 'structure',
+    'sunglasses', 'support', 'switch', 'table', 'tablet', 'teapot',
+    'telephone', 'thermostat', 'tissue', 'tissue box', 'toaster', 'toilet',
+    'toilet paper', 'toiletry', 'tool', 'toothbrush', 'toothpaste', 'towel',
+    'toy', 'tray', 'treadmill', 'trophy', 'tube', 'tv', 'umbrella', 'urn',
+    'utensil', 'vacuum cleaner', 'vanity', 'vase', 'vent', 'ventilation',
+    'wardrobe', 'washbasin', 'washing machine', 'water cooler', 'water heater',
+    'window', 'window frame', 'windowsill', 'wine', 'wire', 'wood', 'wrap')

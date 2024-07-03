@@ -12,13 +12,23 @@ tgt_corners = a['tgt_cor'].cuda()
 
 N = out_corners.shape[0]
 M = tgt_corners.shape[0]
-for i in range(788,789):
-    for j in range(19,20):
+for i in range(1816, 1817):
+    for j in range(58, 59):
         pred_corners = out_corners[i:i+1]
         tar_corners = tgt_corners[j:j+1]
-        print(i,j)
-        print(out_bbox[i])
-        print(tgt_bbox[j])
+        print(i , j)
+        # print(out_bbox[i])
+        # print(tgt_bbox[j])
         iou3d = euler_iou3d(pred_corners, tar_corners)
         print(iou3d)
         print('=====================')
+exit(0)
+for i in range(N):
+    pred_corners = out_corners[i:i+1]
+    tar_corners = tgt_corners
+    print(i, '/', N)
+    # print(out_bbox[i])
+    # print(tgt_bbox[j])
+    iou3d = euler_iou3d(pred_corners, tar_corners)
+    print(iou3d)
+    print('=====================')

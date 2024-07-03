@@ -120,7 +120,13 @@ class GroundingEvaluator:
         positive_map, gt_center, gt_size, gt_rotmat = self._parse_gt(end_points)
 
         # Parse predictions
-        sem_scores = end_points[f'{prefix}sem_cls_scores'].softmax(-1)
+        proj_tokens = end_points['proj_tokens']  # (B, tokens, 64)
+        proj_queries = end_points[f'{prefix}proj_queries']  # (B, Q, 64)
+        sem_scores = torch.matmul(proj_queries, proj_tokens.transpose(-1, -2))
+        sem_scores_ = (sem_scores / 0.07).softmax(-1)  # (B, Q, tokens)
+        sem_scores = torch.zeros(sem_scores_.size(0), sem_scores_.size(1), 256)
+        sem_scores = sem_scores.to(sem_scores_.device)
+        sem_scores[:, :sem_scores_.size(1), :sem_scores_.size(2)] = sem_scores_
 
         if sem_scores.shape[-1] != positive_map.shape[-1]:
             sem_scores_ = torch.zeros(
@@ -132,9 +138,9 @@ class GroundingEvaluator:
         pred_scores, _ = torch.max(sem_scores, dim=-1)
 
         # Parse predictions
-        pred_center = end_points[f'{prefix}center']  # B, Q, 3
-        pred_size = end_points[f'{prefix}pred_size']  # (B,Q,3) (l,w,h)
-        pred_rotmat = end_points[f'{prefix}rot_mat'] # (B, Q, 3, 3)
+        pred_center = end_points[f'{prefix}center'].detach()  # B, Q, 3
+        pred_size = end_points[f'{prefix}pred_size'].detach()  # (B,Q,3) (l,w,h)
+        pred_rotmat = end_points[f'{prefix}rot_mat'].detach() # (B, Q, 3, 3)
         assert (pred_size < 0).sum() == 0
         pred_bbox = torch.cat([pred_center, pred_size], dim=-1)
 
@@ -142,18 +148,13 @@ class GroundingEvaluator:
         pred_res = []
         gt_res = []
         for bid in range(len(positive_map)):    # bid = batch_id
-            print(pred_center.shape)
-            print(pred_size.shape)
-            print(pred_rotmat.shape)
-            print(pred_scores.shape)
-            print(bid)
-            pred_res.append({'center': pred_center[bid].detach().cpu(), 'size': pred_size[bid].detach().cpu(), 'rot': pred_rotmat[bid].detach().cpu(), 'score': pred_scores[bid].detach().cpu()})
+            pred_res.append({'center': pred_center[bid].cpu() , 'size': pred_size[bid].cpu() , 'rot': pred_rotmat[bid].cpu() , 'score': pred_scores[bid].detach().cpu() })
             # Keep scores for annotated objects only
             num_obj = int(end_points['box_label_mask'][bid].sum())
-            gt_center_single = gt_center[bid, :num_obj]
-            gt_size_single = gt_size[bid, :num_obj]
-            gt_rotmat_single = gt_rotmat[bid, :num_obj]
-            gt_res.append({'center': gt_center_single.cpu(), 'size': gt_size_single.cpu(), 'rot': gt_rotmat_single.cpu(), 'sub_class': end_points['sub_class'][bid]})
+            gt_center_single = gt_center[bid, :num_obj].detach()
+            gt_size_single = gt_size[bid, :num_obj].detach()
+            gt_rotmat_single = gt_rotmat[bid, :num_obj].detach()
+            gt_res.append({'center': gt_center_single.cpu() , 'size': gt_size_single.cpu() , 'rot': gt_rotmat_single.cpu() , 'sub_class': end_points['sub_class'][bid]})
             continue
         
         return pred_res, gt_res

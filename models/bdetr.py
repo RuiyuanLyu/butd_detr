@@ -87,7 +87,7 @@ class BeaUTyDETR(nn.Module):
         if self.butd:
             self.butd_class_embeddings = nn.Embedding(num_obj_class, 768)
             saved_embeddings = torch.from_numpy(np.load(
-                'data/class_embeddings3d.npy', allow_pickle=True
+                '/mnt/hwfile/OpenRobotLab/lvruiyuan/lang_embed/class_embeddings3d_es.npy', allow_pickle=True
             ))
             self.butd_class_embeddings.weight.data.copy_(saved_embeddings)
             self.butd_class_embeddings.requires_grad = False
